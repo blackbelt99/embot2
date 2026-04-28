@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Empire Bot{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Your Servers</h1>
+  <p>Select a server to manage Empire Bot settings.</p>
+</div>
+
+{% if mutual %}
+<section class="server-section">
+  <h2 class="section-title2"><span class="dot dot-green"></span> Bot is in these servers</h2>
+  <div class="servers-grid">
+    {% for guild in mutual %}
+    <a href="{{ url_for('server', guild_id=guild.id) }}" class="server-card">
+      {% if guild.icon %}
+        <img src="https://cdn.discordapp.com/icons/{{ guild.id }}/{{ guild.icon }}.png" class="server-icon" alt="icon">
+      {% else %}
+        <div class="server-icon-placeholder">{{ guild.name[0] }}</div>
+      {% endif %}
+      <div class="server-info">
+        <strong>{{ guild.name }}</strong>
+        <span class="tag tag-green">Bot Active</span>
+      </div>
+      <span class="arrow">→</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if not_in %}
+<section class="server-section">
+  <h2 class="section-title2"><span class="dot dot-red"></span> Add bot to these servers</h2>
+  <div class="servers-grid">
+    {% for guild in not_in %}
+    <a href="{{ invite }}&guild_id={{ guild.id }}" class="server-card server-card-inactive" target="_blank">
+      {% if guild.icon %}
+        <img src="https://cdn.discordapp.com/icons/{{ guild.id }}/{{ guild.icon }}.png" class="server-icon" alt="icon">
+      {% else %}
+        <div class="server-icon-placeholder">{{ guild.name[0] }}</div>
+      {% endif %}
+      <div class="server-info">
+        <strong>{{ guild.name }}</strong>
+        <span class="tag tag-red">Not Added</span>
+      </div>
+      <span class="arrow">+ Add</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if not mutual and not not_in %}
+<div class="empty-state">
+  <div class="empty-icon">🤷</div>
+  <h3>No servers found</h3>
+  <p>You need to be an Administrator in a server to manage it.</p>
+  <a href="{{ invite }}" class="btn btn-primary" target="_blank">Add Empire Bot to a Server</a>
+</div>
+{% endif %}
+
+{% endblock %}

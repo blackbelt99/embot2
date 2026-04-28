@@ -1,0 +1,408 @@
+{% extends "base.html" %}
+{% block title %}Admin Panel — Empire Prime{% endblock %}
+{% block content %}
+
+<div class="admin-layout">
+
+  <!-- Sidebar -->
+  <aside class="admin-sidebar">
+    <div class="admin-brand">⚡ Admin Panel</div>
+    <nav class="admin-nav">
+      <button class="anav-btn active" data-tab="overview">📊 Overview</button>
+      <button class="anav-btn" data-tab="pricing">💎 Pricing Plans</button>
+      <button class="anav-btn" data-tab="orders">📦 Orders</button>
+      <button class="anav-btn" data-tab="site">🌐 Site Settings</button>
+      <button class="anav-btn" data-tab="servers">🖥️ Bot Servers</button>
+      <a href="/admin/premium" class="anav-btn" style="text-decoration:none;display:block;text-align:left;">⭐ Premium Servers</a>
+    </nav>
+  </aside>
+
+  <!-- Main -->
+  <div class="admin-main">
+
+    <!-- ══ OVERVIEW ══ -->
+    <div class="apanel active" id="atab-overview">
+      <div class="apanel-header"><h2>📊 Overview</h2></div>
+
+      <div class="stats-row">
+        <div class="stat-card stat-blue">
+          <div class="stat-card-num">{{ stats.guilds }}</div>
+          <div class="stat-card-label">Total Servers</div>
+          <div class="stat-card-icon">🖥️</div>
+        </div>
+        <div class="stat-card stat-green">
+          <div class="stat-card-num">{{ stats.paid }}</div>
+          <div class="stat-card-label">Paid Orders</div>
+          <div class="stat-card-icon">✅</div>
+        </div>
+        <div class="stat-card stat-yellow">
+          <div class="stat-card-num">{{ stats.pending }}</div>
+          <div class="stat-card-label">Pending Orders</div>
+          <div class="stat-card-icon">⏳</div>
+        </div>
+        <div class="stat-card stat-purple">
+          <div class="stat-card-num">{{ stats.total_orders }}</div>
+          <div class="stat-card-label">Total Orders</div>
+          <div class="stat-card-icon">📦</div>
+        </div>
+      </div>
+
+      <div class="acard">
+        <div class="acard-title">Recent Orders</div>
+        <table class="atable">
+          <thead><tr><th>#</th><th>User</th><th>Plan</th><th>Amount</th><th>Status</th><th>Date</th><th>Action</th></tr></thead>
+          <tbody>
+            {% for order in recent_orders %}
+            <tr>
+              <td>#{{ order.id }}</td>
+              <td>{{ order.username or order.user_id }}</td>
+              <td><strong>{{ order.plan_name }}</strong></td>
+              <td><strong>{{ order.amount }}</strong></td>
+              <td><span class="order-badge order-{{ order.status }}">{{ order.status }}</span></td>
+              <td>{{ order.created_at[:10] }}</td>
+              <td>
+                <select class="status-select" onchange="updateOrder({{ order.id }}, this.value)">
+                  <option value="pending"   {{ 'selected' if order.status=='pending' }}>Pending</option>
+                  <option value="paid"      {{ 'selected' if order.status=='paid' }}>Paid</option>
+                  <option value="active"    {{ 'selected' if order.status=='active' }}>Active</option>
+                  <option value="cancelled" {{ 'selected' if order.status=='cancelled' }}>Cancelled</option>
+                  <option value="expired"   {{ 'selected' if order.status=='expired' }}>Expired</option>
+                </select>
+                <button class="btn btn-sm btn-danger" onclick="deleteOrder({{ order.id }})">🗑️</button>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" style="text-align:center;color:var(--text2);padding:24px">No orders yet</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══ PRICING PLANS ══ -->
+    <div class="apanel" id="atab-pricing">
+      <div class="apanel-header">
+        <h2>💎 Pricing Plans</h2>
+        <button class="btn btn-primary" onclick="showAddPlan()">+ Add Plan</button>
+      </div>
+
+      <!-- Plan editor modal -->
+      <div class="modal-overlay" id="plan-modal" style="display:none">
+        <div class="modal-box">
+          <div class="modal-header">
+            <h3 id="modal-title">Add Plan</h3>
+            <button class="modal-close" onclick="closePlanModal()">✕</button>
+          </div>
+          <input type="hidden" id="plan-id">
+          <div class="form-grid2">
+            <div class="form-item">
+              <label>Plan Name</label>
+              <input type="text" id="plan-name" placeholder="e.g. Pro" class="input-full">
+            </div>
+            <div class="form-item">
+              <label>Price</label>
+              <input type="text" id="plan-price" placeholder="e.g. Rs.199" class="input-full">
+            </div>
+            <div class="form-item">
+              <label>Duration</label>
+              <select id="plan-duration" class="input-full">
+                <option>Monthly</option>
+                <option>3 Months</option>
+                <option>6 Months</option>
+                <option>Yearly</option>
+                <option>Lifetime</option>
+              </select>
+            </div>
+            <div class="form-item">
+              <label>Badge</label>
+              <input type="text" id="plan-badge" placeholder="e.g. Gold 👑" class="input-full">
+            </div>
+            <div class="form-item">
+              <label>Color (hex)</label>
+              <div style="display:flex;gap:8px">
+                <input type="color" id="plan-color-picker" value="#5865f2" style="width:48px;height:42px;border-radius:8px;border:1.5px solid var(--border);background:var(--bg2);cursor:pointer" oninput="document.getElementById('plan-color').value=this.value">
+                <input type="text" id="plan-color" value="#5865f2" placeholder="#5865f2" class="input-full" oninput="document.getElementById('plan-color-picker').value=this.value">
+              </div>
+            </div>
+            <div class="form-item">
+              <label>Active</label>
+              <select id="plan-active" class="input-full">
+                <option value="1">✅ Active (Visible)</option>
+                <option value="0">❌ Hidden</option>
+              </select>
+            </div>
+            <div class="form-item form-full2">
+              <label>Description</label>
+              <input type="text" id="plan-desc" placeholder="Brief description" class="input-full">
+            </div>
+            <div class="form-item form-full2">
+              <label>Features (one per line)</label>
+              <textarea id="plan-features" rows="6" class="input-full" placeholder="Anti-Nuke&#10;Music&#10;Tickets&#10;Dashboard Access"></textarea>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closePlanModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="savePlan()">💾 Save Plan</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Plans list -->
+      <div class="plans-admin-grid" id="plans-grid">
+        {% for plan in plans %}
+        <div class="plan-admin-card" id="plan-card-{{ plan.id }}">
+          <div class="plan-admin-top">
+            <div class="plan-admin-badge" style="color:{{ plan.color }}">{{ plan.badge }}</div>
+            <div class="plan-admin-name">{{ plan.name }}</div>
+            <div class="plan-admin-price">{{ plan.price }}<span>/{{ plan.duration }}</span></div>
+            <div class="plan-admin-status">
+              {% if plan.active %}<span class="tag tag-green">Active</span>{% else %}<span class="tag tag-red">Hidden</span>{% endif %}
+            </div>
+          </div>
+          <div class="plan-admin-desc">{{ plan.description }}</div>
+          <ul class="plan-admin-features">
+            {% for f in plan.features %}<li>✅ {{ f }}</li>{% endfor %}
+          </ul>
+          <div class="plan-admin-actions">
+            <button class="btn btn-sm btn-outline" onclick="editPlan({{ plan.id }}, '{{ plan.name }}', '{{ plan.price }}', '{{ plan.duration }}', '{{ plan.description }}', {{ plan.features | tojson }}, '{{ plan.badge }}', '{{ plan.color }}', {{ plan.active }})">✏️ Edit</button>
+            <button class="btn btn-sm btn-danger" onclick="deletePlan({{ plan.id }})">🗑️ Delete</button>
+          </div>
+        </div>
+        {% else %}
+        <div style="grid-column:1/-1;text-align:center;color:var(--text2);padding:40px">No plans yet. Click "+ Add Plan" to create one.</div>
+        {% endfor %}
+      </div>
+      <div id="pricing-status" class="status-msg" style="margin-top:12px"></div>
+    </div>
+
+    <!-- ══ ORDERS ══ -->
+    <div class="apanel" id="atab-orders">
+      <div class="apanel-header">
+        <h2>📦 All Orders</h2>
+        <button class="btn btn-primary" onclick="showAddOrder()">+ Add Order</button>
+      </div>
+
+      <div class="filter-bar">
+        <button class="filter-btn active" onclick="filterOrders('all', this)">All</button>
+        <button class="filter-btn" onclick="filterOrders('pending', this)">⏳ Pending</button>
+        <button class="filter-btn" onclick="filterOrders('paid', this)">✅ Paid</button>
+        <button class="filter-btn" onclick="filterOrders('active', this)">🟢 Active</button>
+        <button class="filter-btn" onclick="filterOrders('cancelled', this)">❌ Cancelled</button>
+      </div>
+
+      <div class="acard">
+        <table class="atable" id="orders-table">
+          <thead><tr><th>#</th><th>User</th><th>Discord ID</th><th>Plan</th><th>Amount</th><th>Payment</th><th>Status</th><th>Date</th><th>Note</th><th>Actions</th></tr></thead>
+          <tbody>
+            {% for order in all_orders %}
+            <tr class="order-row" data-status="{{ order.status }}">
+              <td>#{{ order.id }}</td>
+              <td>{{ order.username or '—' }}</td>
+              <td><code>{{ order.discord_id or '—' }}</code></td>
+              <td><strong>{{ order.plan_name }}</strong></td>
+              <td><strong>{{ order.amount }}</strong></td>
+              <td>{{ order.payment_method or '—' }}</td>
+              <td><span class="order-badge order-{{ order.status }}">{{ order.status }}</span></td>
+              <td>{{ order.created_at[:10] }}</td>
+              <td style="max-width:120px;font-size:12px;color:var(--text2)">{{ order.note or '—' }}</td>
+              <td>
+                <select class="status-select" onchange="updateOrder({{ order.id }}, this.value)">
+                  <option value="pending"   {{ 'selected' if order.status=='pending' }}>Pending</option>
+                  <option value="paid"      {{ 'selected' if order.status=='paid' }}>Paid</option>
+                  <option value="active"    {{ 'selected' if order.status=='active' }}>Active</option>
+                  <option value="cancelled" {{ 'selected' if order.status=='cancelled' }}>Cancelled</option>
+                  <option value="expired"   {{ 'selected' if order.status=='expired' }}>Expired</option>
+                </select>
+                <button class="btn btn-sm btn-danger" onclick="deleteOrder({{ order.id }}, this)" style="margin-top:4px">🗑️</button>
+              </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="10" style="text-align:center;color:var(--text2);padding:24px">No orders yet</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══ SITE SETTINGS ══ -->
+    <div class="apanel" id="atab-site">
+      <div class="apanel-header"><h2>🌐 Site & Bot Settings</h2></div>
+
+      <div class="acard">
+        <div class="acard-title">Contact & Payment Info</div>
+        <div class="form-grid2">
+          <div class="form-item">
+            <label>Discord Server Invite</label>
+            <input type="text" id="site-discord" placeholder="https://discord.gg/..." value="{{ site.get('discord_invite','') or 'https://discord.gg/GAhhVPFZff' }}" class="input-full">
+          </div>
+          <div class="form-item">
+            <label>Contact Discord Username</label>
+            <input type="text" id="site-contact" placeholder="blackbelt#0000" value="{{ site.get('contact_discord','') }}" class="input-full">
+          </div>
+          <div class="form-item">
+            <label>UPI Payment ID</label>
+            <input type="text" id="site-upi" placeholder="yourname@upi" value="{{ site.get('upi_id','') }}" class="input-full">
+          </div>
+          <div class="form-item">
+            <label>PayPal / Other Payment</label>
+            <input type="text" id="site-paypal" placeholder="paypal.me/username" value="{{ site.get('paypal','') }}" class="input-full">
+          </div>
+          <div class="form-item form-full2">
+            <label>Pricing Page Notice (shown on /pricing)</label>
+            <textarea id="site-notice" rows="3" class="input-full" placeholder="After payment, open a ticket or DM us your receipt...">{{ site.get('pricing_notice','') }}</textarea>
+          </div>
+          <div class="form-item form-full2">
+            <label>Bot Description (shown on homepage)</label>
+            <textarea id="site-desc" rows="3" class="input-full" placeholder="Describe your bot...">{{ site.get('bot_description','') }}</textarea>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveSiteConfig()">💾 Save Settings</button>
+        <div id="site-status" class="status-msg"></div>
+      </div>
+    </div>
+
+    <!-- ══ SERVERS ══ -->
+    <div class="apanel" id="atab-servers">
+      <div class="apanel-header"><h2>🖥️ Bot Servers</h2></div>
+      <div class="acard">
+        <div class="acard-title">All servers using Empire Prime ({{ total_guilds }} total)</div>
+        <div class="server-list-admin">
+          {% for gid, gcfg in guild_cfgs.items() %}
+          <div class="server-list-item">
+            <div class="sli-id"><code>{{ gid }}</code></div>
+            <div class="sli-prefix">Prefix: <code>{{ gcfg.prefix or '$' }}</code></div>
+            <div class="sli-an">
+              <span class="tag {{ 'tag-green' if gcfg.an_enabled else 'tag-red' }}">
+                AN: {{ 'ON' if gcfg.an_enabled else 'OFF' }}
+              </span>
+            </div>
+          </div>
+          {% else %}
+          <div style="color:var(--text2);padding:16px">No servers in database yet.</div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+  </div><!-- admin-main -->
+</div><!-- admin-layout -->
+
+{% endblock %}
+{% block scripts %}
+<script>
+// Tab switching
+document.querySelectorAll('.anav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.anav-btn,.apanel').forEach(el => el.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('atab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+function showStatus(id, msg, ok=true) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'status-msg ' + (ok ? 'status-ok' : 'status-err');
+  setTimeout(() => { el.textContent=''; el.className='status-msg'; }, 3500);
+}
+
+async function api(path, data) {
+  const r = await fetch('/admin/api/' + path, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  });
+  return r.json();
+}
+
+// ── Plan Modal ──
+function showAddPlan() {
+  document.getElementById('plan-id').value = '';
+  document.getElementById('plan-name').value = '';
+  document.getElementById('plan-price').value = '';
+  document.getElementById('plan-badge').value = '';
+  document.getElementById('plan-color').value = '#5865f2';
+  document.getElementById('plan-color-picker').value = '#5865f2';
+  document.getElementById('plan-desc').value = '';
+  document.getElementById('plan-features').value = '';
+  document.getElementById('plan-active').value = '1';
+  document.getElementById('modal-title').textContent = 'Add Plan';
+  document.getElementById('plan-modal').style.display = 'flex';
+}
+
+function editPlan(id, name, price, duration, desc, features, badge, color, active) {
+  document.getElementById('plan-id').value = id;
+  document.getElementById('plan-name').value = name;
+  document.getElementById('plan-price').value = price;
+  document.getElementById('plan-duration').value = duration;
+  document.getElementById('plan-badge').value = badge;
+  document.getElementById('plan-color').value = color;
+  document.getElementById('plan-color-picker').value = color;
+  document.getElementById('plan-desc').value = desc;
+  document.getElementById('plan-features').value = features.join('\n');
+  document.getElementById('plan-active').value = active ? '1' : '0';
+  document.getElementById('modal-title').textContent = 'Edit Plan';
+  document.getElementById('plan-modal').style.display = 'flex';
+}
+
+function closePlanModal() {
+  document.getElementById('plan-modal').style.display = 'none';
+}
+
+async function savePlan() {
+  const features = document.getElementById('plan-features').value.split('\n').filter(f => f.trim());
+  const data = {
+    id:       document.getElementById('plan-id').value || null,
+    name:     document.getElementById('plan-name').value,
+    price:    document.getElementById('plan-price').value,
+    duration: document.getElementById('plan-duration').value,
+    description: document.getElementById('plan-desc').value,
+    features,
+    badge:    document.getElementById('plan-badge').value,
+    color:    document.getElementById('plan-color').value,
+    active:   document.getElementById('plan-active').value,
+  };
+  if (!data.name || !data.price) return alert('Name and price are required!');
+  const res = await api('plan/save', data);
+  if (res.ok) { closePlanModal(); location.reload(); }
+  else showStatus('pricing-status', '❌ Failed: ' + (res.error||''), false);
+}
+
+async function deletePlan(id) {
+  if (!confirm('Delete this plan?')) return;
+  const res = await api('plan/delete', {id});
+  if (res.ok) { document.getElementById('plan-card-' + id)?.remove(); showStatus('pricing-status','✅ Deleted!'); }
+}
+
+async function updateOrder(id, status) {
+  const res = await api('order/update', {id, status});
+  if (!res.ok) alert('Failed to update');
+}
+
+async function deleteOrder(id, btn) {
+  if (!confirm('Delete this order?')) return;
+  const res = await api('order/delete', {id});
+  if (res.ok) { btn?.closest('tr')?.remove(); }
+}
+
+function filterOrders(status, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.order-row').forEach(row => {
+    row.style.display = (status === 'all' || row.dataset.status === status) ? '' : 'none';
+  });
+}
+
+async function saveSiteConfig() {
+  const data = {
+    discord_invite: document.getElementById('site-discord').value,
+    contact_discord: document.getElementById('site-contact').value,
+    upi_id: document.getElementById('site-upi').value,
+    paypal: document.getElementById('site-paypal').value,
+    pricing_notice: document.getElementById('site-notice').value,
+    bot_description: document.getElementById('site-desc').value,
+  };
+  const res = await api('site/save', data);
+  showStatus('site-status', res.ok ? '✅ Settings saved!' : '❌ Failed', res.ok);
+}
+</script>
+{% endblock %}

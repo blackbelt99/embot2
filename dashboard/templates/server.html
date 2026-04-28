@@ -1,0 +1,1266 @@
+{% extends "base.html" %}
+{% block title %}{{ guild.name }} — Empire Prime{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <div class="server-header">
+    {% if guild.icon %}
+      <img src="https://cdn.discordapp.com/icons/{{ guild.id }}/{{ guild.icon }}.png" class="server-icon-lg" alt="">
+    {% else %}
+      <div class="server-icon-placeholder-lg">{{ guild.name[0] }}</div>
+    {% endif %}
+    <div>
+      <h1>{{ guild.name }}</h1>
+      <a href="{{ url_for('dashboard') }}" class="back-link">← Back to Dashboard</a>
+    </div>
+  </div>
+</div>
+
+<div class="settings-container">
+  <aside class="settings-sidebar">
+    <button class="tab-btn active" data-tab="general">⚙️ General</button>
+    <button class="tab-btn" data-tab="antinuke">🛡️ Anti-Nuke</button>
+    <button class="tab-btn" data-tab="automod">🤖 Automod</button>
+    <button class="tab-btn" data-tab="antispam">🚫 Anti-Spam</button>
+    <button class="tab-btn" data-tab="logs">📋 Logs</button>
+    <button class="tab-btn" data-tab="whitelist">✅ Whitelist</button>
+    <button class="tab-btn" data-tab="ticket">🎫 Tickets</button>
+    <button class="tab-btn" data-tab="verify">🔐 Verify</button>
+    <button class="tab-btn" data-tab="welcome">👋 Welcome</button>
+    <button class="tab-btn" data-tab="moderation">🔨 Moderation</button>
+    <div class="sidebar-section-label">⭐ PREMIUM</div>
+    <button class="tab-btn premium-tab" data-tab="levels">🏆 Levels & XP</button>
+    <button class="tab-btn premium-tab" data-tab="autorole">🤖 Auto Role</button>
+    <button class="tab-btn premium-tab" data-tab="reactions">⚡ Reactions</button>
+    <button class="tab-btn premium-tab" data-tab="autoresponder">💬 Auto Responder</button>
+    <button class="tab-btn premium-tab" data-tab="tempvc">🔊 Temp VC</button>
+  </aside>
+
+  <div class="settings-panels">
+
+    <!-- ══ GENERAL ══ -->
+    <div class="panel active" id="tab-general">
+      <h2>⚙️ General Settings</h2>
+      <p class="panel-desc">Basic bot configuration for this server.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Bot Prefix</div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Command Prefix</div>
+            <div class="setting-sub">Default is <code>$</code>. Use this before every command.</div>
+          </div>
+          <div class="input-group">
+            <input type="text" id="prefix-input" value="{{ guild_cfg.prefix or '$' }}" maxlength="5" style="width:80px">
+            <button class="btn btn-primary" onclick="savePrefix()">Save</button>
+          </div>
+        </div>
+        <div class="setting-sub" style="margin-top:8px">Current prefix: <code id="prefix-display">{{ guild_cfg.prefix or '$' }}</code></div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Bot Information</div>
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">Server ID</div><code>{{ guild_id }}</code></div>
+          <div class="info-item"><div class="info-label">Bot Status</div><span class="tag tag-green">● Active</span></div>
+          <div class="info-item"><div class="info-label">Prefix</div><code>{{ guild_cfg.prefix or '$' }}</code></div>
+          <div class="info-item"><div class="info-label">Add Bot</div><a href="https://discord.com/oauth2/authorize?client_id=1441328220933849188&permissions=8&scope=bot+applications.commands" class="btn btn-sm btn-primary" target="_blank">Invite</a></div>
+        </div>
+      </div>
+      <div id="general-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ ANTI-NUKE ══ -->
+    <div class="panel" id="tab-antinuke">
+      <h2>🛡️ Anti-Nuke Protection</h2>
+      <p class="panel-desc">Protect your server from mass bans, channel nukes, role manipulation, raids and more.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Protection Status</div>
+        <div class="toggle-card">
+          <div class="toggle-info">
+            <div class="toggle-name">🛡️ Anti-Nuke System</div>
+            <div class="toggle-sub">Auto-punish nukers, mass ban/kick/delete attackers instantly</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="an-enabled" {{ 'checked' if antinuke.enabled }} onchange="saveAntinuke()"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-card">
+          <div class="toggle-info">
+            <div class="toggle-name">🚔 Raid Shield</div>
+            <div class="toggle-sub">Auto-lockdown server when 8+ members join in 5 seconds</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="an-raid" {{ 'checked' if antinuke.raid_shield }} onchange="saveAntinuke()"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Punishment Mode</div>
+        <div class="radio-group">
+          <label class="radio-card {{ 'radio-active' if antinuke.punishment == 'ban' or not antinuke.punishment }}">
+            <input type="radio" name="an-punishment" value="ban" {{ 'checked' if antinuke.punishment == 'ban' or not antinuke.punishment }} onchange="saveAntinuke()">
+            <div class="radio-icon">🔨</div>
+            <div class="radio-title">Ban</div>
+            <div class="radio-sub">Permanent ban — strongest</div>
+          </label>
+          <label class="radio-card {{ 'radio-active' if antinuke.punishment == 'kick' }}">
+            <input type="radio" name="an-punishment" value="kick" {{ 'checked' if antinuke.punishment == 'kick' }} onchange="saveAntinuke()">
+            <div class="radio-icon">👢</div>
+            <div class="radio-title">Kick</div>
+            <div class="radio-sub">Kick — can rejoin</div>
+          </label>
+          <label class="radio-card {{ 'radio-active' if antinuke.punishment == 'strip' }}">
+            <input type="radio" name="an-punishment" value="strip" {{ 'checked' if antinuke.punishment == 'strip' }} onchange="saveAntinuke()">
+            <div class="radio-icon">🎭</div>
+            <div class="radio-title">Strip Roles</div>
+            <div class="radio-sub">Remove dangerous roles only</div>
+          </label>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">What's Protected</div>
+        <div class="protected-grid">
+          <div class="protected-item"><span class="check">✅</span> Mass Ban Detection</div>
+          <div class="protected-item"><span class="check">✅</span> Mass Kick Detection</div>
+          <div class="protected-item"><span class="check">✅</span> Channel Mass Delete</div>
+          <div class="protected-item"><span class="check">✅</span> Channel Mass Create</div>
+          <div class="protected-item"><span class="check">✅</span> Role Mass Delete</div>
+          <div class="protected-item"><span class="check">✅</span> Dangerous Role Grant</div>
+          <div class="protected-item"><span class="check">✅</span> Webhook Spam</div>
+          <div class="protected-item"><span class="check">✅</span> Bot Spam Add</div>
+          <div class="protected-item"><span class="check">✅</span> @everyone Spam</div>
+          <div class="protected-item"><span class="check">✅</span> Ghost Ping Detection</div>
+          <div class="protected-item"><span class="check">✅</span> Command Rate Limit</div>
+          <div class="protected-item"><span class="check">✅</span> Raid Auto-Lockdown</div>
+        </div>
+      </div>
+
+      <div id="an-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ AUTOMOD ══ -->
+    <div class="panel" id="tab-automod">
+      <h2>🤖 Automod Rules</h2>
+      <p class="panel-desc">Automatically detect and remove rule-breaking content. Each rule can be toggled independently.</p>
+
+      {% set am = automod.settings or {} %}
+      {% set rules = [
+        ('mass_mention', '📢 Mass Mentions', '@everyone / @here spam protection'),
+        ('caps', '🔠 Excessive CAPS', 'Messages with more than 60% capital letters'),
+        ('links', '🔗 All Links', 'Block any URL in messages'),
+        ('discord_links', '💬 Discord Invites', 'Block Discord server invite links'),
+        ('invites', '📨 Invite Links', 'Block general invite link spam'),
+        ('emoji_spam', '😂 Emoji Spam', 'More than 6 emojis per message'),
+        ('nsfw_links', '🔞 NSFW Links', 'Adult/NSFW website links'),
+        ('ext_apps', '🤖 Bot Promotion', 'External bot and app links'),
+        ('token_spam', '🔑 Token Detection', 'Discord token detection and alert'),
+      ] %}
+
+      <div class="card-section">
+        <div class="card-section-title">Content Rules</div>
+        <div class="rules-list">
+          {% for key, label, desc in rules %}
+          <div class="rule-row">
+            <div class="rule-info">
+              <div class="rule-name">{{ label }}</div>
+              <div class="rule-desc">{{ desc }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" class="am-toggle" data-key="{{ key }}" {{ 'checked' if am.get(key) }} onchange="saveAutomod()">
+              <span class="slider"></span>
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div id="am-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ ANTI-SPAM ══ -->
+    <div class="panel" id="tab-antispam">
+      <h2>🚫 Anti-Spam Settings</h2>
+      <p class="panel-desc">Automatically timeout users who send too many messages too fast.</p>
+
+      <div class="card-section">
+        <div class="toggle-card">
+          <div class="toggle-info">
+            <div class="toggle-name">🚫 Anti-Spam Protection</div>
+            <div class="toggle-sub">7+ messages in 10 seconds → 10 minute timeout</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="antispam-enabled" {{ 'checked' if antispam }} onchange="saveAntispam()"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">How It Works</div>
+        <div class="info-grid">
+          <div class="info-item"><div class="info-label">Trigger</div><code>7 messages / 10s</code></div>
+          <div class="info-item"><div class="info-label">Punishment</div><code>10 min timeout</code></div>
+          <div class="info-item"><div class="info-label">Command spam</div><code>5 min timeout</code></div>
+          <div class="info-item"><div class="info-label">Ghost ping (3x)</div><code>10 min timeout</code></div>
+        </div>
+      </div>
+      <div id="antispam-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ LOGS ══ -->
+    <div class="panel" id="tab-logs">
+      <h2>📋 Log Channels</h2>
+      <p class="panel-desc">Set where bot sends activity logs. Right-click any channel in Discord → Copy ID.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Log Channel IDs</div>
+        <div class="log-grid">
+          <div class="log-item">
+            <div class="log-label">🤖 Bot Log</div>
+            <div class="log-sub">Member joins/leaves, message edits/deletes, voice activity</div>
+            <input type="text" id="log-bot" placeholder="Channel ID" value="{{ guild_cfg.bot_log or '' }}" class="input-full">
+          </div>
+          <div class="log-item">
+            <div class="log-label">🔨 Mod Log</div>
+            <div class="log-sub">Bans, kicks, warns, timeouts, mutes</div>
+            <input type="text" id="log-mod" placeholder="Channel ID" value="{{ guild_cfg.mod_log or '' }}" class="input-full">
+          </div>
+          <div class="log-item">
+            <div class="log-label">📨 Invite Log</div>
+            <div class="log-sub">Who invited who, invite usage tracking</div>
+            <input type="text" id="log-invite" placeholder="Channel ID" value="{{ guild_cfg.invite_log or '' }}" class="input-full">
+          </div>
+          <div class="log-item">
+            <div class="log-label">🎫 Ticket Log</div>
+            <div class="log-sub">Ticket created, closed, claimed events</div>
+            <input type="text" id="log-ticket" placeholder="Channel ID" value="{{ guild_cfg.ticket_log or '' }}" class="input-full">
+          </div>
+          <div class="log-item">
+            <div class="log-label">🛡️ Anti-Nuke Log</div>
+            <div class="log-sub">Security alerts, nuke detections, punishments</div>
+            <input type="text" id="log-antinuke" placeholder="Channel ID" value="{{ antinuke.log_channel or '' }}" class="input-full">
+          </div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveLogs()">💾 Save Log Channels</button>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Quick Setup</div>
+        <p class="panel-desc">Or use this command in Discord to set all logs to one channel:</p>
+        <div class="code-block"><code>$setuplogs all #your-log-channel</code></div>
+      </div>
+      <div id="logs-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ WHITELIST ══ -->
+    <div class="panel" id="tab-whitelist">
+      <h2>✅ Anti-Nuke Whitelist</h2>
+      <p class="panel-desc">Whitelisted users bypass ALL anti-nuke checks. Only add trusted admins/staff.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Add User</div>
+        <div class="setting-sub" style="margin-bottom:10px">Enter Discord User ID (right-click user → Copy ID)</div>
+        <div class="input-group">
+          <input type="text" id="wl-user-id" placeholder="Discord User ID (e.g. 123456789)" style="flex:1">
+          <button class="btn btn-primary" onclick="addWhitelist()">Add to Whitelist</button>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Whitelisted Users</div>
+        <div class="wl-list" id="wl-list">
+          {% for uid in wl_users %}
+          <div class="wl-item" id="wl-{{ uid }}">
+            <div class="wl-info">
+              <div class="wl-icon">👤</div>
+              <div>
+                <div style="font-weight:600">User ID: {{ uid }}</div>
+                <div class="setting-sub">Bypasses all anti-nuke protection</div>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeWhitelist('{{ uid }}')">Remove</button>
+          </div>
+          {% else %}
+          <div class="empty-small" id="wl-empty">No whitelisted users — server owner is always whitelisted automatically.</div>
+          {% endfor %}
+        </div>
+      </div>
+      <div id="wl-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ TICKETS ══ -->
+    <div class="panel" id="tab-ticket">
+      <h2>🎫 Ticket System</h2>
+      <p class="panel-desc">Customize the ticket panel, configure security, and manage categories. Use <code>$ticket panel</code> in Discord after saving.</p>
+
+      <div class="subtab-bar">
+        <button class="subtab-btn active" onclick="switchSubtab('ticket-panel',this)">🎨 Panel</button>
+        <button class="subtab-btn"        onclick="switchSubtab('ticket-security',this)">🔒 Security</button>
+        <button class="subtab-btn"        onclick="switchSubtab('ticket-cmds',this)">📋 Commands</button>
+      </div>
+
+      <!-- Panel Settings -->
+      <div class="subtab-panel subtab-active" id="subtab-ticket-panel">
+        <div class="card-section">
+          <div class="card-section-title">Panel Appearance</div>
+          <div class="form-grid">
+            <div class="form-item">
+              <label>Panel Title</label>
+              <input type="text" id="ticket-title" placeholder="e.g. Empire — Support Ticket" value="{{ ticket.panel_title or '' }}" class="input-full">
+            </div>
+            <div class="form-item">
+              <label>Support Hours</label>
+              <input type="text" id="ticket-hours" placeholder="e.g. 11:30 AM to 11:30 PM" value="{{ ticket.support_hours or '' }}" class="input-full">
+            </div>
+            <div class="form-item form-full">
+              <label>Panel Description</label>
+              <textarea id="ticket-desc" rows="3" class="input-full" placeholder="Describe when to open a ticket...">{{ ticket.panel_desc or '' }}</textarea>
+            </div>
+            <div class="form-item form-full">
+              <label>Rules (one per line)</label>
+              <textarea id="ticket-rules" rows="4" class="input-full" placeholder="Be patient and wait for staff&#10;No spam in tickets&#10;Be respectful">{{ ticket.panel_rules | join('\n') if ticket.panel_rules else '' }}</textarea>
+            </div>
+            <div class="form-item">
+              <label>Footer Text</label>
+              <input type="text" id="ticket-footer" placeholder="Empire | empire-bot.xyz" value="{{ ticket.footer or '' }}" class="input-full">
+            </div>
+            <div class="form-item">
+              <label>Ping Role ID</label>
+              <input type="text" id="ticket-ping" placeholder="Staff role ID" value="{{ ticket.ping_role or '' }}" class="input-full">
+              <div class="setting-sub">Role pinged when a new ticket is opened</div>
+            </div>
+            <div class="form-item form-full">
+              <label>Close DM Message</label>
+              <textarea id="ticket-closedm" rows="2" class="input-full" placeholder="Your ticket {ticket_name} was closed by {closer}">{{ ticket.close_dm or '' }}</textarea>
+              <div class="setting-sub">Variables: <code>{ticket_name}</code> <code>{closer}</code></div>
+            </div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:16px" onclick="saveTicket()">💾 Save Ticket Settings</button>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">Category Mapping</div>
+          <p class="setting-sub" style="margin-bottom:12px">Set which Discord category each ticket type goes into. Use Discord commands below or set via bot.</p>
+          <div class="info-grid" style="gap:8px">
+            <div class="info-item" style="background:var(--bg3);border-radius:8px;padding:10px 14px">
+              <div class="info-label">Set category for one type</div>
+              <code style="font-size:12px">$ticket setcategory buy #PURCHASE-TICKETS</code>
+            </div>
+            <div class="info-item" style="background:var(--bg3);border-radius:8px;padding:10px 14px">
+              <div class="info-label">Set ONE category for ALL types</div>
+              <code style="font-size:12px">$ticket setcategory all #TICKETS</code>
+            </div>
+            <div class="info-item" style="background:var(--bg3);border-radius:8px;padding:10px 14px">
+              <div class="info-label">View all mappings</div>
+              <code style="font-size:12px">$ticket showcategories</code>
+            </div>
+            <div class="info-item" style="background:var(--bg3);border-radius:8px;padding:10px 14px">
+              <div class="info-label">Add custom ticket type</div>
+              <code style="font-size:12px">$ticket addcat 🎮 Gaming</code>
+            </div>
+          </div>
+          <div style="margin-top:12px;padding:12px;background:rgba(87,242,135,0.08);border:1px solid rgba(87,242,135,0.2);border-radius:8px;font-size:13px">
+            💡 <strong>Fix:</strong> If tickets aren't appearing in your set category, run <code>$ticket showcategories</code> to verify. Custom ticket types (added with <code>$ticket addcat</code>) now fully support category mapping!
+          </div>
+        </div>
+      </div>
+
+      <!-- Security Settings -->
+      <div class="subtab-panel" id="subtab-ticket-security">
+        <div class="card-section">
+          <div class="card-section-title">🔒 Ticket Security</div>
+          <p class="setting-sub" style="margin-bottom:16px">Protect your ticket system from abuse, spam, and new/fake accounts.</p>
+
+          <div class="form-grid">
+            <div class="form-item">
+              <label>🎂 Minimum Account Age (days)</label>
+              <input type="number" id="ticket-minage" min="0" max="3650" placeholder="0 = disabled"
+                value="{{ ticket.min_account_age or 0 }}" class="input-full">
+              <div class="setting-sub">Accounts newer than this cannot open tickets (0 = disabled)</div>
+            </div>
+            <div class="form-item">
+              <label>⏳ Ticket Cooldown (seconds)</label>
+              <input type="number" id="ticket-cooldown" min="0" max="86400" placeholder="300"
+                value="300" class="input-full">
+              <div class="setting-sub">How long users must wait between opening tickets</div>
+            </div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:16px" onclick="saveTicketSecurity()">💾 Save Security Settings</button>
+          <div id="ticket-security-status" class="status-msg"></div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">🚫 Ticket Blacklist</div>
+          <p class="setting-sub" style="margin-bottom:12px">Blacklisted users cannot open any tickets. Manage via Discord commands.</p>
+          <div class="cmd-list">
+            <div class="cmd-list-item"><code>$ticket blacklist @user [reason]</code> — Block user from tickets</div>
+            <div class="cmd-list-item"><code>$ticket unblacklist @user</code> — Remove from blacklist</div>
+            <div class="cmd-list-item"><code>$ticket blacklistinfo</code> — View all blacklisted users</div>
+            <div class="cmd-list-item"><code>$ticket blacklistinfo @user</code> — Check one user</div>
+          </div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">📊 Security Overview</div>
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">Min Account Age</div>
+              <span>{{ ticket.min_account_age or 0 }} days{% if not ticket.min_account_age %} <span class="tag" style="background:rgba(254,231,92,0.15);color:#fee75c;font-size:11px">disabled</span>{% endif %}</span>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Cooldown</div>
+              <span>300s (5 min)</span>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Account Age Warning</div>
+              <span class="tag tag-green">Always Active</span>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Blacklist Check</div>
+              <span class="tag tag-green">Always Active</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Commands Reference -->
+      <div class="subtab-panel" id="subtab-ticket-cmds">
+        <div class="card-section">
+          <div class="card-section-title">Panel Commands</div>
+          <div class="cmd-list">
+            <div class="cmd-list-item"><code>$ticket panel</code> — Send ticket panel to current channel</div>
+            <div class="cmd-list-item"><code>$ticket setup</code> — Interactive setup wizard</div>
+            <div class="cmd-list-item"><code>$ticket close</code> — Close current ticket</div>
+          </div>
+        </div>
+        <div class="card-section">
+          <div class="card-section-title">Category Commands</div>
+          <div class="cmd-list">
+            <div class="cmd-list-item"><code>$ticket addcat 🎮 Gaming</code> — Add custom ticket type</div>
+            <div class="cmd-list-item"><code>$ticket removecat Gaming</code> — Remove ticket type</div>
+            <div class="cmd-list-item"><code>$ticket listcats</code> — View all ticket types</div>
+            <div class="cmd-list-item"><code>$ticket setcategory all #channel</code> — Set Discord category for ALL types</div>
+            <div class="cmd-list-item"><code>$ticket setcategory buy #channel</code> — Set category for one type</div>
+            <div class="cmd-list-item"><code>$ticket showcategories</code> — View all category mappings</div>
+          </div>
+        </div>
+        <div class="card-section">
+          <div class="card-section-title">Security Commands</div>
+          <div class="cmd-list">
+            <div class="cmd-list-item"><code>$ticket blacklist @user [reason]</code> — Blacklist a user</div>
+            <div class="cmd-list-item"><code>$ticket unblacklist @user</code> — Remove blacklist</div>
+            <div class="cmd-list-item"><code>$ticket blacklistinfo</code> — View all blacklisted users</div>
+            <div class="cmd-list-item"><code>$ticket security</code> — View security settings</div>
+            <div class="cmd-list-item"><code>$ticket security minage 7</code> — Set min account age</div>
+            <div class="cmd-list-item"><code>$ticket security cooldown 300</code> — Set cooldown (seconds)</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="ticket-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ VERIFY ══ -->
+    <div class="panel" id="tab-verify">
+      <h2>🔐 Verification System</h2>
+      <p class="panel-desc">Members click a button to verify. Gets Verified role, loses Unverified role. Use <code>$verify panel</code> in Discord after saving.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Role & Channel IDs</div>
+        <div class="form-grid">
+          <div class="form-item">
+            <label>✅ Verified Role ID</label>
+            <input type="text" id="verify-role" placeholder="Role ID" value="{{ verify.verified_role or '' }}" class="input-full">
+            <div class="setting-sub">Given after verification</div>
+          </div>
+          <div class="form-item">
+            <label>❌ Unverified Role ID</label>
+            <input type="text" id="unverify-role" placeholder="Role ID" value="{{ verify.unverified_role or '' }}" class="input-full">
+            <div class="setting-sub">Removed after verification</div>
+          </div>
+          <div class="form-item">
+            <label>📌 Verify Channel ID</label>
+            <input type="text" id="verify-channel" placeholder="Channel ID" value="{{ verify.verify_channel or '' }}" class="input-full">
+            <div class="setting-sub">Where the verify button is posted</div>
+          </div>
+          <div class="form-item">
+            <label>📋 Verify Log Channel ID</label>
+            <input type="text" id="verify-log" placeholder="Channel ID" value="{{ verify.log_channel or '' }}" class="input-full">
+            <div class="setting-sub">Logs each verification with user info</div>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveVerify()">💾 Save Verify Settings</button>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Setup Guide</div>
+        <div class="steps-mini">
+          <div class="step-mini"><span class="step-mini-num">1</span> Create <code>Verified</code> and <code>Unverified</code> roles in Discord</div>
+          <div class="step-mini"><span class="step-mini-num">2</span> Set Unverified role to block all channels except #verify-here</div>
+          <div class="step-mini"><span class="step-mini-num">3</span> Fill in Role/Channel IDs above and save</div>
+          <div class="step-mini"><span class="step-mini-num">4</span> Run <code>$verify panel</code> in Discord</div>
+          <div class="step-mini"><span class="step-mini-num">5</span> Or run <code>$verify setup</code> to auto-create everything</div>
+        </div>
+      </div>
+      <div id="verify-status" class="status-msg"></div>
+    </div>
+
+    <!-- ══ WELCOME ══ -->
+    <div class="panel" id="tab-welcome">
+      <h2>👋 Welcome Messages</h2>
+      <p class="panel-desc">Configure join, leave and boost messages with full embed customization.</p>
+
+      <div class="subtab-bar">
+        <button class="subtab-btn active" onclick="switchSubtab('join',this)">📥 Join</button>
+        <button class="subtab-btn"        onclick="switchSubtab('leave',this)">📤 Leave</button>
+        <button class="subtab-btn"        onclick="switchSubtab('boost',this)">🚀 Boost</button>
+      </div>
+
+      {% for mtype, mlabel, mcolor, mdef_title, mdef_desc in [
+        ('join',  'Join',  '#57f287', 'Welcome to {server}!', 'Hey {mention}, welcome to **{server}**! You are member #{count}.'),
+        ('leave', 'Leave', '#ed4245', '{user} has left.',     '{user} just left. We now have {count} members.'),
+        ('boost', 'Boost', '#f47fff', '🚀 New Boost!',        'Thanks {mention} for boosting {server}! Total: {boost_count} boosts!'),
+      ] %}
+      {% set wcfg = welcome_data.get(mtype, {}) %}
+      <div class="subtab-panel{% if loop.first %} subtab-active{% endif %}" id="subtab-{{ mtype }}">
+
+        <div class="card-section">
+          <div class="toggle-card">
+            <div class="toggle-info">
+              <div class="toggle-name">{{ '📥 Join' if mtype=='join' else ('📤 Leave' if mtype=='leave' else '🚀 Boost') }} Messages</div>
+              <div class="toggle-sub">{{ 'Send when a member joins' if mtype=='join' else ('Send when a member leaves' if mtype=='leave' else 'Send when a member boosts') }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="w{{ mtype }}-enabled" {{ 'checked' if wcfg.get('enabled') }} onchange="saveWelcomeType('{{ mtype }}')">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">Channel</div>
+          <input type="text" id="w{{ mtype }}-channel" placeholder="Channel ID" value="{{ wcfg.get('channel_id','') or '' }}" class="input-full">
+          <div class="setting-sub" style="margin-top:6px">Right-click channel in Discord → Copy ID</div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">Embed Content</div>
+          <div class="form-grid">
+            <div class="form-item form-full">
+              <label>Title</label>
+              <input type="text" id="w{{ mtype }}-title" value="{{ wcfg.get('title') or mdef_title }}" class="input-full" oninput="updatePreview('{{ mtype }}')">
+            </div>
+            <div class="form-item form-full">
+              <label>Description</label>
+              <textarea id="w{{ mtype }}-desc" rows="3" class="input-full" oninput="updatePreview('{{ mtype }}')">{{ wcfg.get('description') or mdef_desc }}</textarea>
+            </div>
+            <div class="form-item form-full">
+              <label>Footer</label>
+              <input type="text" id="w{{ mtype }}-footer" value="{{ wcfg.get('footer_text','Empire Prime') }}" class="input-full" oninput="updatePreview('{{ mtype }}')">
+            </div>
+          </div>
+          <div class="setting-sub" style="margin-top:8px">
+            Variables: <code>{mention}</code> <code>{user}</code> <code>{server}</code> <code>{count}</code> <code>{id}</code> <code>{created_at}</code>{% if mtype=='boost' %} <code>{boost_count}</code>{% endif %}
+          </div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">Embed Style</div>
+          <div class="form-grid">
+            <div class="form-item">
+              <label>Color</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="color" id="w{{ mtype }}-colorpick" value="{{ wcfg.get('color') or mcolor }}"
+                  style="width:48px;height:42px;border-radius:8px;border:1.5px solid var(--border);cursor:pointer"
+                  oninput="document.getElementById('w{{ mtype }}-color').value=this.value;updatePreview('{{ mtype }}')">
+                <input type="text"  id="w{{ mtype }}-color" value="{{ wcfg.get('color') or mcolor }}" class="input-full"
+                  oninput="document.getElementById('w{{ mtype }}-colorpick').value=this.value;updatePreview('{{ mtype }}')">
+              </div>
+            </div>
+            <div class="form-item">
+              <label>Thumbnail</label>
+              <select id="w{{ mtype }}-thumb" class="input-full">
+                <option value="member" {{ 'selected' if not wcfg or wcfg.get('thumbnail','member')=='member' }}>👤 Member Avatar</option>
+                <option value="server" {{ 'selected' if wcfg.get('thumbnail')=='server' }}>🏠 Server Icon</option>
+                <option value="none"   {{ 'selected' if wcfg.get('thumbnail')=='none' }}>❌ None</option>
+              </select>
+            </div>
+            <div class="form-item form-full">
+              <label>Banner Image URL (optional)</label>
+              <input type="text" id="w{{ mtype }}-image" placeholder="https://example.com/banner.png" value="{{ wcfg.get('image_url','') }}" class="input-full">
+            </div>
+          </div>
+        </div>
+
+        <div class="card-section">
+          <div class="toggle-card">
+            <div class="toggle-info">
+              <div class="toggle-name">📋 Show Info Fields</div>
+              <div class="toggle-sub">Joined date, Account age, Member # fields in embed</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="w{{ mtype }}-fields" {{ 'checked' if wcfg.get('show_fields', 1) }}>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card-section">
+          <div class="card-section-title">Live Preview</div>
+          <div class="welcome-preview-wrap">
+            <div class="wp-preview-label">Live Discord Preview</div>
+            <div class="welcome-preview">
+              <div class="wp-header">
+                <div class="wp-avatar">⚡</div>
+                <div>
+                  <span class="wp-author">Empire Prime</span>
+                  <span class="wp-bot-tag">BOT</span>
+                  <span class="wp-ts">Today at {{ "now" }}</span>
+                </div>
+              </div>
+              <div class="wp-body">
+                <div class="wp-embed" id="wpembed-{{ mtype }}" style="border-left-color:{{ wcfg.get('color') or mcolor }}">
+                  <div class="wp-embed-inner">
+                    <div class="wp-embed-content">
+                      <div class="wp-title" id="wptitle-{{ mtype }}">{{ wcfg.get('title') or mdef_title }}</div>
+                      <div class="wp-desc"  id="wpdesc-{{ mtype }}">{{ (wcfg.get('description') or mdef_desc)|replace('\n', '
+') }}</div>
+                      <div class="wp-fields">
+                        {% if mtype == 'join' %}
+                        <div class="wp-field"><div class="wp-fname">📅 Joined</div><div class="wp-fval">Just now</div></div>
+                        <div class="wp-field"><div class="wp-fname">🎂 Account</div><div class="wp-fval">2 yrs ago</div></div>
+                        <div class="wp-field"><div class="wp-fname">👥 Member</div><div class="wp-fval">#1,337</div></div>
+                        {% elif mtype == 'boost' %}
+                        <div class="wp-field"><div class="wp-fname">⚡ Level</div><div class="wp-fval">Level 2</div></div>
+                        <div class="wp-field"><div class="wp-fname">💎 Boosts</div><div class="wp-fval">15</div></div>
+                        {% else %}
+                        <div class="wp-field"><div class="wp-fname">⏱️ Was here</div><div class="wp-fval">3 months</div></div>
+                        <div class="wp-field"><div class="wp-fname">👥 Members</div><div class="wp-fval">1,336</div></div>
+                        {% endif %}
+                      </div>
+                      <div class="wp-footer-row">
+                        <div class="wp-footer-icon"></div>
+                        <div class="wp-footer" id="wpfooter-{{ mtype }}">{{ wcfg.get('footer_text') or 'Empire Prime' }}</div>
+                      </div>
+                    </div>
+                    <div class="wp-thumb">👤</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" onclick="saveWelcomeType('{{ mtype }}')">💾 Save {{ mlabel }} Settings</button>
+        <div id="w{{ mtype }}-status" class="status-msg"></div>
+      </div>
+      {% endfor %}
+    </div>
+
+
+
+    <!-- ══ MODERATION ══ -->
+    <div class="panel" id="tab-moderation">
+      <h2>🔨 Moderation Commands</h2>
+      <p class="panel-desc">Reference guide for all moderation commands available to staff.</p>
+
+      <div class="card-section">
+        <div class="card-section-title">Member Actions</div>
+        <div class="cmd-list">
+          <div class="cmd-list-item"><code>$ban @user [reason]</code> — Ban a member</div>
+          <div class="cmd-list-item"><code>$unban &lt;ID&gt;</code> — Unban by user ID</div>
+          <div class="cmd-list-item"><code>$kick @user [reason]</code> — Kick a member</div>
+          <div class="cmd-list-item"><code>$timeout @user 10m [reason]</code> — Timeout (s/m/h/d)</div>
+          <div class="cmd-list-item"><code>$warn @user [reason]</code> — Warn a member</div>
+          <div class="cmd-list-item"><code>$warnings @user</code> — View warnings</div>
+          <div class="cmd-list-item"><code>$clearwarns @user</code> — Clear warnings</div>
+          <div class="cmd-list-item"><code>$note @user [text]</code> — Add staff note</div>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Channel Actions</div>
+        <div class="cmd-list">
+          <div class="cmd-list-item"><code>$purge 10</code> — Delete last 10 messages</div>
+          <div class="cmd-list-item"><code>$lock</code> — Lock current channel</div>
+          <div class="cmd-list-item"><code>$unlock</code> — Unlock channel</div>
+          <div class="cmd-list-item"><code>$hide</code> — Hide channel from everyone</div>
+          <div class="cmd-list-item"><code>$unhide</code> — Unhide channel</div>
+          <div class="cmd-list-item"><code>$slowmode 5</code> — Set slowmode (seconds)</div>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="card-section-title">Anti-Nuke Controls</div>
+        <div class="cmd-list">
+          <div class="cmd-list-item"><code>$antinuke enable</code> — Enable anti-nuke</div>
+          <div class="cmd-list-item"><code>$antinuke whitelist @user</code> — Whitelist user</div>
+          <div class="cmd-list-item"><code>$antinuke setpunish ban</code> — Set punishment</div>
+          <div class="cmd-list-item"><code>$antinuke setlog #channel</code> — Set log channel</div>
+          <div class="cmd-list-item"><code>$antinuke raid on</code> — Enable raid shield</div>
+          <div class="cmd-list-item"><code>$antinuke lock</code> — Manual lockdown</div>
+          <div class="cmd-list-item"><code>$antinuke status</code> — View full status</div>
+        </div>
+      </div>
+    </div>
+
+  <!-- ══ LEVELS & XP ══ -->
+  <div class="panel" id="tab-levels">
+    <h2>🏆 Levels & XP System</h2>
+    <p class="panel-desc">Reward active members with XP and level roles. Members earn XP by chatting.</p>
+
+    <div class="card-section">
+      <div class="card-section-title">Level System Toggle</div>
+      <div class="toggle-card">
+        <div class="toggle-info">
+          <div class="toggle-name">🏆 XP & Leveling</div>
+          <div class="toggle-sub">Members earn XP per message. Auto-creates level roles on enable.</div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="level-enabled" {{ 'checked' if premium_cfg.level_enabled }} onchange="saveLevelConfig()"><span class="slider"></span></label>
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">Level-up Announcement Channel</div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Announce Channel</div>
+          <div class="setting-sub">Bot will ping the member here when they level up. Leave blank to disable.</div>
+        </div>
+        <div class="input-group">
+          <input type="text" id="level-channel" placeholder="Channel ID" value="{{ premium_cfg.level_channel or '' }}" style="width:180px">
+          <button class="btn btn-primary" onclick="saveLevelConfig()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">Level Roles (Auto-created)</div>
+      <div class="info-grid">
+        <div class="info-item"><div class="info-label">Level 1</div><span class="tag tag-green">🌱 Newcomer</span></div>
+        <div class="info-item"><div class="info-label">Level 5</div><span class="tag tag-yellow">⚡ Rising Star</span></div>
+        <div class="info-item"><div class="info-label">Level 10</div><span class="tag tag-orange">🔥 Pro Member</span></div>
+        <div class="info-item"><div class="info-label">Level 20</div><span class="tag tag-blue">💎 Elite</span></div>
+        <div class="info-item"><div class="info-label">Level 50</div><span class="tag tag-purple">👑 Legend</span></div>
+      </div>
+      <div class="setting-sub" style="margin-top:8px">Roles are created automatically when you run <code>$setlevel on</code> in Discord. Use <code>$rank</code> to check XP and <code>$leaderboard</code> for the top 10.</div>
+    </div>
+    <div id="level-status" class="status-msg"></div>
+  </div>
+
+  <!-- ══ AUTO ROLE ══ -->
+  <div class="panel" id="tab-autorole">
+    <h2>🤖 Auto Role</h2>
+    <p class="panel-desc">Automatically assign roles when a member joins the server.</p>
+
+    <div class="card-section">
+      <div class="card-section-title">Add Auto Role</div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Role ID</div>
+          <div class="setting-sub">Enter the Discord Role ID to auto-assign on join.</div>
+        </div>
+        <div class="input-group">
+          <input type="text" id="autorole-input" placeholder="Role ID" style="width:180px">
+          <button class="btn btn-primary" onclick="addAutorole()">Add Role</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">Current Auto Roles</div>
+      <div id="autorole-list">
+        {% if premium_cfg.autorole %}
+          {% for rid in premium_cfg.autorole %}
+          <div class="wl-item" id="autorole-{{ rid }}">
+            <div class="wl-info">
+              <div class="wl-icon">🤖</div>
+              <div><div style="font-weight:600">Role ID: {{ rid }}</div><div class="setting-sub">Auto-assigned on member join</div></div>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeAutorole('{{ rid }}')">Remove</button>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="setting-sub" id="autorole-empty">No auto roles set. Add a role ID above.</div>
+        {% endif %}
+      </div>
+    </div>
+    <div id="autorole-status" class="status-msg"></div>
+  </div>
+
+  <!-- ══ REACTIONS ══ -->
+  <div class="panel" id="tab-reactions">
+    <h2>⚡ Reactions</h2>
+    <p class="panel-desc">Auto-react to messages in channels or when specific keywords are used.</p>
+
+    <div class="card-section">
+      <div class="card-section-title">⚡ Auto React — React to every message in a channel</div>
+      <div class="setting-row" style="flex-wrap:wrap;gap:8px">
+        <input type="text" id="autoreact-channel" placeholder="Channel ID" style="width:160px">
+        <input type="text" id="autoreact-emojis" placeholder="Emojis: 👍 ❤️ 🔥" style="width:200px">
+        <button class="btn btn-primary" onclick="addAutoreact()">Set</button>
+      </div>
+      <div id="autoreact-list" style="margin-top:12px">
+        {% if premium_cfg.autoreact %}
+          {% for ch_id, emojis in premium_cfg.autoreact.items() %}
+          <div class="wl-item" id="autoreact-{{ ch_id }}">
+            <div class="wl-info">
+              <div class="wl-icon">⚡</div>
+              <div><div style="font-weight:600">Channel: {{ ch_id }}</div><div class="setting-sub">{{ emojis | join(' ') }}</div></div>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeAutoreact('{{ ch_id }}')">Remove</button>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="setting-sub">No auto-react channels set.</div>
+        {% endif %}
+      </div>
+      <div id="autoreact-status" class="status-msg"></div>
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">💬 Word React — React when a keyword is typed</div>
+      <div class="setting-row" style="flex-wrap:wrap;gap:8px">
+        <input type="text" id="wordreact-keyword" placeholder="Keyword (e.g. hii)" style="width:140px">
+        <input type="text" id="wordreact-emojis" placeholder="Emojis: 🎉 👋" style="width:200px">
+        <button class="btn btn-primary" onclick="addWordreact()">Add</button>
+      </div>
+      <div id="wordreact-list" style="margin-top:12px">
+        {% if premium_cfg.wordreact %}
+          {% for word, emojis in premium_cfg.wordreact.items() %}
+          <div class="wl-item" id="wordreact-{{ word }}">
+            <div class="wl-info">
+              <div class="wl-icon">💬</div>
+              <div><div style="font-weight:600">Keyword: <code>{{ word }}</code></div><div class="setting-sub">{{ emojis | join(' ') }}</div></div>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeWordreact('{{ word }}')">Remove</button>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="setting-sub">No word reacts set.</div>
+        {% endif %}
+      </div>
+      <div id="wordreact-status" class="status-msg"></div>
+    </div>
+  </div>
+
+  <!-- ══ AUTO RESPONDER ══ -->
+  <div class="panel" id="tab-autoresponder">
+    <h2>💬 Auto Responder</h2>
+    <p class="panel-desc">Automatically reply when someone types a specific trigger word or phrase.</p>
+
+    <div class="card-section">
+      <div class="card-section-title">Add Auto Response</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Trigger</div>
+            <div class="setting-sub">The word or phrase that triggers the response.</div>
+          </div>
+          <input type="text" id="ar-trigger" placeholder="e.g. hello" style="width:200px">
+        </div>
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">Response</div>
+            <div class="setting-sub">What the bot will reply with.</div>
+          </div>
+          <input type="text" id="ar-response" placeholder="e.g. Hey! How can I help?" style="width:240px">
+        </div>
+        <button class="btn btn-primary" style="align-self:flex-start" onclick="addAutoresponder()">Add Response</button>
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">Current Auto Responses</div>
+      <div id="ar-list">
+        {% if premium_cfg.autoresponder %}
+          {% for trigger, response in premium_cfg.autoresponder.items() %}
+          <div class="wl-item" id="ar-{{ trigger | replace(' ','_') }}">
+            <div class="wl-info">
+              <div class="wl-icon">💬</div>
+              <div>
+                <div style="font-weight:600">Trigger: <code>{{ trigger }}</code></div>
+                <div class="setting-sub">{{ response[:80] }}{% if response|length > 80 %}...{% endif %}</div>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-danger" onclick="removeAutoresponder('{{ trigger }}')">Remove</button>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="setting-sub" id="ar-empty">No auto responses set. Add one above.</div>
+        {% endif %}
+      </div>
+    </div>
+    <div id="ar-status" class="status-msg"></div>
+  </div>
+
+  <!-- ══ TEMP VC ══ -->
+  <div class="panel" id="tab-tempvc">
+    <h2>🔊 Temp Voice Channels</h2>
+    <p class="panel-desc">When a member joins the "hub" VC, a private temporary channel is automatically created for them and deleted when empty.</p>
+
+    <div class="card-section">
+      <div class="card-section-title">Hub Voice Channel</div>
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-name">Hub Channel ID</div>
+          <div class="setting-sub">Members who join this VC will get their own private temp VC.</div>
+        </div>
+        <div class="input-group">
+          <input type="text" id="tempvc-channel" placeholder="Voice Channel ID" value="{{ premium_cfg.tempvc or '' }}" style="width:180px">
+          <button class="btn btn-primary" onclick="saveTempVC()">Save</button>
+        </div>
+      </div>
+      {% if premium_cfg.tempvc %}
+      <div class="setting-sub" style="margin-top:8px">✅ Currently active — Hub Channel ID: <code>{{ premium_cfg.tempvc }}</code></div>
+      {% endif %}
+    </div>
+
+    <div class="card-section">
+      <div class="card-section-title">Disable Temp VC</div>
+      <button class="btn btn-danger" onclick="disableTempVC()">Disable Temp VC</button>
+      <div class="setting-sub" style="margin-top:8px">This will stop creating new temp VCs. Existing ones will remain until empty.</div>
+    </div>
+    <div id="tempvc-status" class="status-msg"></div>
+  </div>
+
+</div><!-- end settings-panels -->
+</div><!-- end container -->
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const GID = '{{ guild_id }}';
+
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn, .panel').forEach(el => el.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// Radio cards highlight
+document.querySelectorAll('.radio-card input').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('radio-active'));
+    r.closest('.radio-card').classList.add('radio-active');
+  });
+});
+
+function showStatus(id, msg, ok=true) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'status-msg ' + (ok ? 'status-ok' : 'status-err');
+  setTimeout(() => { el.textContent=''; el.className='status-msg'; }, 3500);
+}
+
+async function api(path, data) {
+  const r = await fetch(`/api/${GID}/${path}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+async function savePrefix() {
+  const val = document.getElementById('prefix-input').value.trim() || '$';
+  const res = await api('prefix', {prefix: val});
+  document.getElementById('prefix-display').textContent = val;
+  showStatus('general-status', res.ok ? '✅ Prefix saved! Restart bot to apply.' : '❌ Failed', res.ok);
+}
+
+async function saveAntinuke() {
+  const punishment = document.querySelector('input[name="an-punishment"]:checked')?.value || 'ban';
+  const data = {
+    enabled:     document.getElementById('an-enabled').checked ? 1 : 0,
+    raid_shield: document.getElementById('an-raid').checked ? 1 : 0,
+    punishment,
+  };
+  const res = await api('antinuke', data);
+  showStatus('an-status', res.ok ? '✅ Anti-Nuke settings saved!' : '❌ Failed', res.ok);
+}
+
+async function saveAntispam() {
+  const enabled = document.getElementById('antispam-enabled').checked;
+  const res = await api('antispam', {enabled});
+  showStatus('antispam-status', res.ok ? '✅ Anti-Spam saved!' : '❌ Failed', res.ok);
+}
+
+async function saveAutomod() {
+  const settings = {};
+  document.querySelectorAll('.am-toggle').forEach(el => { settings[el.dataset.key] = el.checked; });
+  const res = await api('automod', {settings});
+  showStatus('am-status', res.ok ? '✅ Automod rules saved!' : '❌ Failed', res.ok);
+}
+
+async function saveLogs() {
+  const data = {
+    bot_log:    document.getElementById('log-bot').value || '0',
+    mod_log:    document.getElementById('log-mod').value || '0',
+    invite_log: document.getElementById('log-invite').value || '0',
+    ticket_log: document.getElementById('log-ticket').value || '0',
+    antinuke_log: document.getElementById('log-antinuke').value || '0',
+  };
+  const res = await api('logs', data);
+  showStatus('logs-status', res.ok ? '✅ Log channels saved!' : '❌ Failed', res.ok);
+}
+
+async function addWhitelist() {
+  const uid = document.getElementById('wl-user-id').value.trim();
+  if (!uid || isNaN(uid)) return showStatus('wl-status', '❌ Enter a valid User ID', false);
+  const res = await api('whitelist/add', {user_id: uid});
+  if (res.ok) {
+    document.getElementById('wl-user-id').value = '';
+    const empty = document.getElementById('wl-empty');
+    if (empty) empty.remove();
+    document.getElementById('wl-list').insertAdjacentHTML('beforeend', `
+      <div class="wl-item" id="wl-${uid}">
+        <div class="wl-info"><div class="wl-icon">👤</div>
+          <div><div style="font-weight:600">User ID: ${uid}</div><div class="setting-sub">Bypasses anti-nuke</div></div>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeWhitelist('${uid}')">Remove</button>
+      </div>`);
+    showStatus('wl-status', '✅ User whitelisted!');
+  } else showStatus('wl-status', '❌ Failed', false);
+}
+
+async function removeWhitelist(uid) {
+  const res = await api('whitelist/remove', {user_id: uid});
+  if (res.ok) { document.getElementById('wl-' + uid)?.remove(); showStatus('wl-status', '✅ Removed!'); }
+}
+
+async function saveTicket() {
+  const rules = document.getElementById('ticket-rules').value.split('\n').filter(r => r.trim());
+  const data = {
+    panel_title:   document.getElementById('ticket-title').value,
+    panel_desc:    document.getElementById('ticket-desc').value,
+    support_hours: document.getElementById('ticket-hours').value,
+    footer:        document.getElementById('ticket-footer').value,
+    close_dm:      document.getElementById('ticket-closedm').value,
+    panel_rules:   rules,
+    ping_role:     document.getElementById('ticket-ping').value || '0',
+  };
+  const res = await api('ticket', data);
+  showStatus('ticket-status', res.ok ? '✅ Ticket settings saved! Run $ticket panel in Discord to update.' : '❌ Failed', res.ok);
+}
+
+async function saveVerify() {
+  const data = {
+    verified_role:   document.getElementById('verify-role').value || '0',
+    unverified_role: document.getElementById('unverify-role').value || '0',
+    verify_channel:  document.getElementById('verify-channel').value || '0',
+    log_channel:     document.getElementById('verify-log').value || '0',
+  };
+  const res = await api('verify', data);
+  showStatus('verify-status', res.ok ? '✅ Verify settings saved! Run $verify panel in Discord.' : '❌ Failed', res.ok);
+}
+
+async function saveWelcomeType(mtype) {
+  const g = (id) => document.getElementById('w'+mtype+'-'+id);
+  const data = {
+    msg_type:    mtype,
+    enabled:     g('enabled')?.checked ? 1 : 0,
+    channel_id:  g('channel')?.value || '0',
+    title:       g('title')?.value || '',
+    description: g('desc')?.value || '',
+    color:       g('color')?.value || '#57f287',
+    thumbnail:   g('thumb')?.value || 'member',
+    image_url:   g('image')?.value || '',
+    footer_text: g('footer')?.value || 'Empire Prime',
+    show_fields: g('fields')?.checked ? 1 : 0,
+  };
+  const res = await api('welcome', data);
+  showStatus('w'+mtype+'-status', res.ok ? '✅ '+mtype.charAt(0).toUpperCase()+mtype.slice(1)+' settings saved!' : '❌ Failed', res.ok);
+}
+
+function switchSubtab(type, btn) {
+  document.querySelectorAll('.subtab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.subtab-panel').forEach(p => p.classList.remove('subtab-active'));
+  btn.classList.add('active');
+  const el = document.getElementById('subtab-'+type);
+  if(el) el.classList.add('subtab-active');
+}
+
+function updatePreview(mtype) {
+  const g = (id) => document.getElementById('w'+mtype+'-'+id);
+  const color   = g('color')?.value || '#57f287';
+  const title   = g('title')?.value || '';
+  const desc    = g('desc')?.value  || '';
+  const footer  = g('footer')?.value|| 'Empire Prime';
+  // update embed left-border color
+  const embed   = document.getElementById('wpembed-'+mtype);
+  const ptitle  = document.getElementById('wptitle-'+mtype);
+  const pdesc   = document.getElementById('wpdesc-'+mtype);
+  const pfooter = document.getElementById('wpfooter-'+mtype);
+  if(embed)   embed.style.borderLeftColor = color;
+  if(ptitle)  ptitle.textContent = title;
+  if(pdesc)   { pdesc.textContent = desc; pdesc.style.whiteSpace = 'pre-line'; }
+  if(pfooter) pfooter.textContent = footer;
+}
+
+async function saveTicketSecurity() {
+  const minage  = parseInt(document.getElementById('ticket-minage')?.value || '0');
+  const res = await api('ticket', {min_account_age: minage});
+  showStatus('ticket-security-status', res.ok ? '✅ Security settings saved!' : '❌ Failed to save.', res.ok);
+}
+
+async function saveVerify()
+ {
+  const data = {
+    verified_role:   document.getElementById('verify-role').value || '0',
+    unverified_role: document.getElementById('unverify-role').value || '0',
+    verify_channel:  document.getElementById('verify-channel').value || '0',
+    log_channel:     document.getElementById('verify-log').value || '0',
+  };
+  const res = await api('verify', data);
+  showStatus('verify-status', res.ok ? '✅ Verify settings saved! Run $verify panel in Discord.' : '❌ Failed', res.ok);
+}
+
+// ─── Premium Feature JS ───────────────────────────────────────────────────────
+
+async function saveLevelConfig() {
+  const enabled = document.getElementById('level-enabled').checked;
+  const channel = document.getElementById('level-channel').value.trim() || '';
+  const res = await api('premium/level', { enabled, channel });
+  showStatus('level-status', res.ok ? '✅ Level settings saved! Run $setlevel on in Discord to create roles.' : '❌ Failed', res.ok);
+}
+
+async function addAutorole() {
+  const rid = document.getElementById('autorole-input').value.trim();
+  if (!rid || isNaN(rid)) return showStatus('autorole-status', '❌ Enter a valid Role ID', false);
+  const res = await api('premium/autorole', { action: 'add', role_id: rid });
+  if (res.ok) {
+    document.getElementById('autorole-input').value = '';
+    const empty = document.getElementById('autorole-empty');
+    if (empty) empty.remove();
+    document.getElementById('autorole-list').insertAdjacentHTML('beforeend', `
+      <div class="wl-item" id="autorole-${rid}">
+        <div class="wl-info"><div class="wl-icon">🤖</div>
+          <div><div style="font-weight:600">Role ID: ${rid}</div><div class="setting-sub">Auto-assigned on member join</div></div>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeAutorole('${rid}')">Remove</button>
+      </div>`);
+    showStatus('autorole-status', '✅ Auto role added!');
+  } else showStatus('autorole-status', '❌ Failed', false);
+}
+
+async function removeAutorole(rid) {
+  const res = await api('premium/autorole', { action: 'remove', role_id: rid });
+  if (res.ok) { document.getElementById('autorole-' + rid)?.remove(); showStatus('autorole-status', '✅ Removed!'); }
+}
+
+async function addAutoreact() {
+  const ch = document.getElementById('autoreact-channel').value.trim();
+  const em = document.getElementById('autoreact-emojis').value.trim();
+  if (!ch || isNaN(ch)) return showStatus('autoreact-status', '❌ Enter a valid Channel ID', false);
+  if (!em) return showStatus('autoreact-status', '❌ Enter at least one emoji', false);
+  const res = await api('premium/autoreact', { action: 'set', channel_id: ch, emojis: em });
+  if (res.ok) {
+    document.getElementById('autoreact-channel').value = '';
+    document.getElementById('autoreact-emojis').value = '';
+    const existing = document.getElementById('autoreact-' + ch);
+    if (existing) existing.querySelector('.setting-sub').textContent = em;
+    else document.getElementById('autoreact-list').insertAdjacentHTML('beforeend', `
+      <div class="wl-item" id="autoreact-${ch}">
+        <div class="wl-info"><div class="wl-icon">⚡</div>
+          <div><div style="font-weight:600">Channel: ${ch}</div><div class="setting-sub">${em}</div></div>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeAutoreact('${ch}')">Remove</button>
+      </div>`);
+    showStatus('autoreact-status', '✅ Auto-react set!');
+  } else showStatus('autoreact-status', '❌ Failed', false);
+}
+
+async function removeAutoreact(chId) {
+  const res = await api('premium/autoreact', { action: 'remove', channel_id: chId });
+  if (res.ok) { document.getElementById('autoreact-' + chId)?.remove(); showStatus('autoreact-status', '✅ Removed!'); }
+}
+
+async function addWordreact() {
+  const kw = document.getElementById('wordreact-keyword').value.trim();
+  const em = document.getElementById('wordreact-emojis').value.trim();
+  if (!kw) return showStatus('wordreact-status', '❌ Enter a keyword', false);
+  if (!em) return showStatus('wordreact-status', '❌ Enter at least one emoji', false);
+  const res = await api('premium/wordreact', { action: 'add', keyword: kw, emojis: em });
+  if (res.ok) {
+    document.getElementById('wordreact-keyword').value = '';
+    document.getElementById('wordreact-emojis').value = '';
+    const slug = kw.replace(/\s+/g,'_');
+    const existing = document.getElementById('wordreact-' + slug);
+    if (existing) existing.querySelector('.setting-sub').textContent = em;
+    else document.getElementById('wordreact-list').insertAdjacentHTML('beforeend', `
+      <div class="wl-item" id="wordreact-${slug}">
+        <div class="wl-info"><div class="wl-icon">💬</div>
+          <div><div style="font-weight:600">Keyword: <code>${kw}</code></div><div class="setting-sub">${em}</div></div>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeWordreact('${kw}')">Remove</button>
+      </div>`);
+    showStatus('wordreact-status', '✅ Word react added!');
+  } else showStatus('wordreact-status', '❌ Failed', false);
+}
+
+async function removeWordreact(kw) {
+  const res = await api('premium/wordreact', { action: 'remove', keyword: kw });
+  const slug = kw.replace(/\s+/g,'_');
+  if (res.ok) { document.getElementById('wordreact-' + slug)?.remove(); showStatus('wordreact-status', '✅ Removed!'); }
+}
+
+async function addAutoresponder() {
+  const trigger = document.getElementById('ar-trigger').value.trim();
+  const response = document.getElementById('ar-response').value.trim();
+  if (!trigger) return showStatus('ar-status', '❌ Enter a trigger', false);
+  if (!response) return showStatus('ar-status', '❌ Enter a response', false);
+  const res = await api('premium/autoresponder', { action: 'add', trigger, response });
+  if (res.ok) {
+    document.getElementById('ar-trigger').value = '';
+    document.getElementById('ar-response').value = '';
+    const empty = document.getElementById('ar-empty');
+    if (empty) empty.remove();
+    const slug = trigger.replace(/\s+/g,'_');
+    document.getElementById('ar-list').insertAdjacentHTML('beforeend', `
+      <div class="wl-item" id="ar-${slug}">
+        <div class="wl-info"><div class="wl-icon">💬</div>
+          <div><div style="font-weight:600">Trigger: <code>${trigger}</code></div><div class="setting-sub">${response.substring(0,80)}</div></div>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeAutoresponder('${trigger}')">Remove</button>
+      </div>`);
+    showStatus('ar-status', '✅ Auto response added!');
+  } else showStatus('ar-status', '❌ Failed', false);
+}
+
+async function removeAutoresponder(trigger) {
+  const res = await api('premium/autoresponder', { action: 'remove', trigger });
+  const slug = trigger.replace(/\s+/g,'_');
+  if (res.ok) { document.getElementById('ar-' + slug)?.remove(); showStatus('ar-status', '✅ Removed!'); }
+}
+
+async function saveTempVC() {
+  const ch = document.getElementById('tempvc-channel').value.trim() || '0';
+  const res = await api('premium/tempvc', { channel_id: ch });
+  showStatus('tempvc-status', res.ok ? '✅ Temp VC hub saved!' : '❌ Failed', res.ok);
+}
+
+async function disableTempVC() {
+  const res = await api('premium/tempvc', { channel_id: '0' });
+  if (res.ok) { document.getElementById('tempvc-channel').value = ''; showStatus('tempvc-status', '✅ Temp VC disabled!'); }
+}
+</script>
+
+<style>
+.sidebar-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--text-muted, #888);
+  padding: 12px 12px 4px;
+  text-transform: uppercase;
+}
+.premium-tab {
+  border-left: 3px solid #fee75c !important;
+}
+.premium-tab.active {
+  border-left-color: #fee75c !important;
+}
+.tag-orange { background: rgba(255,115,0,0.15); color: #ff7300; }
+.tag-purple { background: rgba(163,74,243,0.15); color: #a34af3; }
+</style>
+{% endblock %}

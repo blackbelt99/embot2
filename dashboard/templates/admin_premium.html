@@ -1,0 +1,326 @@
+{% extends "base.html" %}
+{% block title %}Premium Management — Empire Admin{% endblock %}
+{% block content %}
+
+<style>
+.pm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.pm-title { font-size: 1.6rem; font-weight: 800; color: #fee75c; }
+.pm-subtitle { color: var(--text2); font-size: 0.9rem; margin-top: 4px; }
+.pm-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+.pm-stat {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  text-align: center;
+}
+.pm-stat-val { font-size: 2rem; font-weight: 800; color: #fee75c; }
+.pm-stat-label { color: var(--text2); font-size: 0.85rem; margin-top: 4px; }
+
+/* Activate form */
+.pm-activate-card {
+  background: var(--bg2);
+  border: 2px solid #fee75c44;
+  border-radius: 16px;
+  padding: 28px;
+  margin-bottom: 32px;
+}
+.pm-activate-card h3 { color: #fee75c; margin-bottom: 20px; font-size: 1.1rem; }
+.pm-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+@media (max-width: 700px) { .pm-form-row { grid-template-columns: 1fr; } }
+.pm-field label { font-size: 0.8rem; color: var(--text2); margin-bottom: 6px; display: block; }
+.pm-field input, .pm-field select {
+  width: 100%;
+  background: var(--bg3, #1e1f22);
+  border: 1px solid var(--border);
+  color: var(--text1);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}
+.btn-gold {
+  background: linear-gradient(135deg, #fee75c, #f0a500);
+  color: #111;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 0.9rem;
+  transition: opacity 0.2s;
+}
+.btn-gold:hover { opacity: 0.85; }
+
+/* Server list */
+.pm-table-wrap {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.pm-table-head {
+  display: grid;
+  grid-template-columns: 2fr 1.2fr 1.2fr 1.2fr 1fr auto;
+  padding: 14px 20px;
+  background: var(--bg3, #1e1f22);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text2);
+  font-weight: 700;
+}
+.pm-row {
+  display: grid;
+  grid-template-columns: 2fr 1.2fr 1.2fr 1.2fr 1fr auto;
+  padding: 14px 20px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  transition: background 0.15s;
+}
+.pm-row:hover { background: var(--bg3, #1e1f22); }
+.pm-guild { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.pm-guild img { width: 32px; height: 32px; border-radius: 50%; }
+.pm-guild-noicon {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: #fee75c33;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.85rem; font-weight: 700; color: #fee75c;
+}
+.pm-badge-plan {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: #fee75c22;
+  color: #fee75c;
+}
+.pm-badge-active {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: #23a55a22;
+  color: #23a55a;
+}
+.pm-empty { text-align: center; padding: 60px; color: var(--text2); }
+.btn-deactivate {
+  background: #ed424522;
+  color: #ed4245;
+  border: 1px solid #ed424544;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+.btn-deactivate:hover { background: #ed424544; }
+
+.pm-toast {
+  position: fixed;
+  bottom: 32px; right: 32px;
+  background: #23a55a;
+  color: white;
+  padding: 12px 20px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 20px #0005;
+  display: none;
+  z-index: 9999;
+}
+.pm-toast.error { background: #ed4245; }
+</style>
+
+<div class="pm-header">
+  <div>
+    <div class="pm-title">⭐ Premium Server Management</div>
+    <div class="pm-subtitle">Activate or deactivate premium for servers after purchase</div>
+  </div>
+  <a href="/admin" class="btn btn-glass">← Back to Admin</a>
+</div>
+
+<!-- Stats -->
+<div class="pm-stats">
+  <div class="pm-stat">
+    <div class="pm-stat-val">{{ premium_servers|length }}</div>
+    <div class="pm-stat-label">Active Premium</div>
+  </div>
+  <div class="pm-stat">
+    <div class="pm-stat-val">{{ bot_guilds|length }}</div>
+    <div class="pm-stat-label">Bot Servers</div>
+  </div>
+</div>
+
+<!-- Activate Form -->
+<div class="pm-activate-card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h3 style="margin:0">⚡ Activate Premium for a Server</h3>
+    <button onclick="syncGuilds()" style="background:#fee75c;color:#000;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;font-size:0.9rem">🔄 Sync Servers</button>
+  </div>
+  <div class="pm-form-row">
+    <div class="pm-field">
+      <label>Server (Bot is in)</label>
+      <select id="act-guild">
+        <option value="">— Select Server —</option>
+        {% for g in bot_guilds %}
+        <option value="{{ g.id }}">{{ g.name }} ({{ g.id }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="pm-field">
+      <label>Plan Name</label>
+      <select id="act-plan">
+        <option value="Basic">🥉 Basic</option>
+        <option value="Pro">🥈 Pro</option>
+        <option value="Premium" selected>⭐ Premium</option>
+        <option value="VIP">👑 VIP</option>
+      </select>
+    </div>
+    <div class="pm-field">
+      <label>Expires At (optional)</label>
+      <input type="date" id="act-expires" placeholder="Leave blank for lifetime">
+    </div>
+    <div>
+      <button class="btn-gold" onclick="activatePremium()">⭐ Activate</button>
+    </div>
+  </div>
+  <div style="margin-top:12px; font-size:0.82rem; color:var(--text2);">
+    💡 Tip: After activating, the server can immediately use <code>$premiumhelp</code> in Discord to see all features.
+  </div>
+</div>
+
+<!-- Active Premium Servers Table -->
+<div class="pm-table-wrap">
+  <div class="pm-table-head">
+    <span>Server</span>
+    <span>Plan</span>
+    <span>Activated By</span>
+    <span>Activated At</span>
+    <span>Expires</span>
+    <span>Action</span>
+  </div>
+
+  {% if premium_servers %}
+    {% for srv in premium_servers %}
+    <div class="pm-row" id="row-{{ srv.guild_id }}">
+      <div class="pm-guild">
+        {% if srv.guild_icon %}
+          <img src="https://cdn.discordapp.com/icons/{{ srv.guild_id }}/{{ srv.guild_icon }}.webp?size=64" alt="">
+        {% else %}
+          <div class="pm-guild-noicon">{{ srv.guild_name[0]|upper }}</div>
+        {% endif %}
+        <div>
+          <div>{{ srv.guild_name if srv.guild_name and not srv.guild_name.startswith('Unknown') else '⚠️ Unknown Server' }}</div>
+          <div style="font-size:0.75rem;color:var(--text2);cursor:pointer;user-select:all" 
+               title="Click to copy" onclick="navigator.clipboard.writeText('{{ srv.guild_id }}');this.textContent='Copied!';setTimeout(()=>this.textContent='{{ srv.guild_id }}',1200)">
+            {{ srv.guild_id }}
+          </div>
+        </div>
+      </div>
+      <div><span class="pm-badge-plan">{{ srv.plan_name }}</span></div>
+      <div style="color:var(--text2);font-size:0.87rem">{{ srv.activated_by }}</div>
+      <div style="color:var(--text2);font-size:0.82rem">{{ srv.activated_at[:10] if srv.activated_at else '—' }}</div>
+      <div style="color:var(--text2);font-size:0.82rem">{{ srv.expires_at[:10] if srv.expires_at else '♾️ Lifetime' }}</div>
+      <div>
+        <button class="btn-deactivate" onclick="deactivate({{ srv.guild_id }})">Revoke</button>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="pm-empty">
+      ⭐ No premium servers yet.<br>
+      <span style="font-size:0.85rem;margin-top:8px;display:block">Use the form above to activate premium for a server after they purchase.</span>
+    </div>
+  {% endif %}
+</div>
+
+<div class="pm-toast" id="toast"></div>
+
+<script>
+function showToast(msg, isError=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'pm-toast' + (isError ? ' error' : '');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+async function activatePremium() {
+  const guild_id  = document.getElementById('act-guild').value;
+  const plan_name = document.getElementById('act-plan').value;
+  const expires   = document.getElementById('act-expires').value;
+  if (!guild_id) return showToast('Select a server first!', true);
+
+  const res = await fetch('/admin/api/premium/activate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ guild_id: parseInt(guild_id), plan_name, expires_at: expires })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    showToast('✅ Premium activated! Page will reload...');
+    setTimeout(() => location.reload(), 1500);
+  } else {
+    showToast('❌ ' + (data.error || 'Failed'), true);
+  }
+}
+
+async function deactivate(guild_id) {
+  if (!confirm('Revoke premium for this server?')) return;
+  const res = await fetch('/admin/api/premium/deactivate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ guild_id })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    const row = document.getElementById('row-' + guild_id);
+    if (row) row.remove();
+    showToast('Premium revoked.');
+  } else {
+    showToast('❌ ' + (data.error || 'Failed'), true);
+  }
+}
+async function syncGuilds() {
+  const btn = event.target;
+  btn.textContent = '⏳ Syncing...';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/admin/api/sync-guilds', {method:'POST', headers:{'Content-Type':'application/json'}});
+    const d = await r.json();
+    if (d.ok) {
+      showToast(`✅ Synced ${d.synced} servers from Discord!`);
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      showToast('❌ Sync failed: ' + d.error, true);
+    }
+  } catch(e) {
+    showToast('❌ Error: ' + e, true);
+  }
+  btn.textContent = '🔄 Sync Servers';
+  btn.disabled = false;
+}
+</script>
+
+{% endblock %}

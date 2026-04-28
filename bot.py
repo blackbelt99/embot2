@@ -1,0 +1,11132 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║         EMPIRE BOT — Python Edition (discord.py)      ║
+# ║  Tickets · Timeout · AFK · Invites · Moderation · Utility   ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+import os, re, asyncio
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+from collections import defaultdict
+import db as DB
+
+# Always load .env from same folder as bot.py, regardless of run directory
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+
+# ─── Config ──────────────────────────────────────────────────────────────────
+def _int_env(key):
+    val = os.getenv(key, "").strip()
+    try:
+        return int(val) if val and val.isdigit() else 0
+    except:
+        return 0
+
+TOKEN               = os.getenv("BOT_TOKEN", "").strip()
+BOT_NAME            = os.getenv("BOT_NAME", "Empire Prime").strip()
+BOT_OWNER_ID        = 1251119503492775956  # Black Belt — can use $grantpremium, $revokepremium etc
+STREAM_URL          = os.getenv("STREAM_URL", "https://twitch.tv/empire").strip()
+OAUTH_BASE_URL      = os.getenv("OAUTH_BASE_URL", "https://bot.strengthcloud.xyz").strip()
+BOT_INVITE_URL      = os.getenv("BOT_INVITE_URL", "https://discord.com/oauth2/authorize").strip()
+SUPPORT_SERVER_URL  = os.getenv("SUPPORT_SERVER_URL", "https://discord.gg/empire").strip()
+VOTE_URL            = os.getenv("VOTE_URL", "https://top.gg/bot/empire").strip()
+FAQ_URL             = os.getenv("FAQ_URL", "https://bot.strengthcloud.xyz/faq").strip()
+TICKET_CATEGORY_ID  = _int_env("TICKET_CATEGORY_ID")
+TICKET_LOG_ID       = _int_env("TICKET_LOG_CHANNEL_ID")
+MOD_LOG_ID          = _int_env("MOD_LOG_CHANNEL")
+BOT_LOG_ID          = _int_env("BOT_LOG_CHANNEL")
+INVITE_LOG_ID       = _int_env("INVITE_LOG_CHANNEL")
+SUPPORT_ROLE_ID     = _int_env("SUPPORT_ROLE_ID")
+TICKET_COOLDOWN_S   = 300  # 5 minutes
+FAKE_DAYS           = 30   # accounts newer than this = fake (change with $setfakedays)
+
+# Per-guild ticket settings (replaces global single-value vars)
+_TICKET_PING_ROLE   = {}   # guild_id → role_id
+_TICKET_CLOSE_DM    = {}   # guild_id → message string
+DEFAULT_CLOSE_DM = "Your ticket **{ticket_name}** has been closed by **{closer}**. Thank you for contacting us! If you have any further questions, feel free to open a new ticket."
+
+def get_ticket_ping(guild_id):
+    return _TICKET_PING_ROLE.get(guild_id, 0)
+
+def get_ticket_close_dm(guild_id):
+    return _TICKET_CLOSE_DM.get(guild_id, DEFAULT_CLOSE_DM)
+
+
+# ─── Custom Server Emojis ─────────────────────────────────────────────────────
+EMOJIS = {
+    "aflamegreen":      "<a:aflamegreen:1483344066748874792>",
+    "HyperTada":        "<a:HyperTada:1483343030315520032>",
+    "clock":            "<a:clock:1483340836467900507>",
+    "crown":            "<a:crown:1483340832429051995>",
+    "Emoji":            "<a:Emoji:1483337444756820039>",
+    "Gustavo":          "<a:Gustavo:1483337442986823782>",
+    "GIF":              "<a:GIF:1483337441187463313>",
+    "_emoji_13__":      "<a:_emoji_13__:1483337439291375717>",
+    "_emoji_":          "<a:_emoji_:1483337437286764544>",
+    "Moderation":       "<a:Moderation:1483344127071486123>",
+    "Tick":             "<a:Tick:1483344124357644350>",
+    "Pop":              "<a:Pop:1483344115499536567>",
+    "PikaHi":           "<a:PikaHi:1483344111405891706>",
+    "Gift":             "<a:Gift:1483344100353642497>",
+    "loopline":         "<a:loopline:1483344097178550403>",
+    "Announcement":     "<a:Announcement:1483344095228461056>",
+    "POLICE":           "<a:POLICE:1483344078547456091>",
+    "x_gift":           "<a:disabled1:1483344744024248453>",
+    "antinuke":         "<a:antinuke:1483344748990435370>",
+    "disabled1":        "<a:disabled1:1483344744024248453>",
+    "enabled":          "<a:enabled:1483344741675569325>",
+    "arrow_flashright": "<a:arrow_flashright:1483344142062059580>",
+    "ARedArrow":        "<a:ARedArrow:1483344139452940338>",
+    "Hashtag":          "<a:Hashtag:1483344136760201380>",
+    "_emergencia_":     "<a:_emergencia_:1483337435382288558>",
+    "arrow_white":      "<a:arrow_white:1483335702832877578>",
+}
+def E(name: str) -> str:
+    return EMOJIS.get(name, "")
+
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+C_PRIMARY = discord.Color.blurple()
+C_SUCCESS = discord.Color.green()
+C_ERROR   = discord.Color.red()
+C_WARN    = discord.Color.yellow()
+C_INFO    = discord.Color.blue()
+C_TICKET  = discord.Color.from_str("#eb459e")
+C_AFK     = discord.Color.purple()
+C_INVITE  = discord.Color.teal()
+
+# ─── In-Memory Stores ────────────────────────────────────────────────────────
+afk_map        = {}   # user_id → {"reason": str, "time": datetime}
+invite_cache   = {}   # guild_id → {code: uses}
+invite_tracker = defaultdict(lambda: defaultdict(lambda: {"invites": 0, "left": 0, "fake": 0, "rejoins": 0}))
+member_inviter  = {}   # (guild_id, member_id) → inviter_id
+member_type     = {}   # (guild_id, member_id) → "real"|"fake"|"rejoin"
+warn_map       = defaultdict(list)   # (guild_id, user_id) → [{"reason","mod","time"}]
+note_map       = defaultdict(list)   # (guild_id, user_id) → [{"text","mod","time"}]
+ticket_cd      = {}   # user_id → datetime
+
+# ─── Bot Setup ───────────────────────────────────────────────────────────────
+intents = discord.Intents.all()
+GUILD_PREFIXES = {}  # guild_id → prefix string
+
+def get_prefix(bot, message):
+    if message.guild:
+        return GUILD_PREFIXES.get(message.guild.id, "$")
+    return "$"
+
+bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
+
+# ─── Database Init ────────────────────────────────────────────────────────────
+DB.init_db()  # Create tables if not exist
+
+
+def _load_db_into_memory():
+    """Load all persistent guild data from SQLite into memory on startup."""
+    # Prefixes & logs — per-guild only (public bot)
+    all_settings = DB.load_all_logs()
+    for gid, cfg in all_settings.items():
+        if cfg.get("prefix"):
+            GUILD_PREFIXES[gid] = cfg["prefix"]
+
+    # Anti-Nuke
+    for gid, cfg in DB.load_all_antinuke().items():
+        ANTINUKE_ENABLED[gid]    = bool(cfg["enabled"])
+        ANTINUKE_PUNISHMENT[gid] = cfg["punishment"]
+        if cfg["log_channel"]:
+            ANTINUKE_LOG_CHANNEL[gid] = cfg["log_channel"]
+        _raid_shield[gid] = bool(cfg["raid_shield"])
+
+    u_wl, r_wl, ev_wl = DB.load_all_whitelists()
+    for gid, users in u_wl.items():
+        ANTINUKE_WHITELIST[gid].update(users)
+    for gid, roles in r_wl.items():
+        ANTINUKE_ROLE_WHITELIST[gid].update(roles)
+    for gid, user_evs in ev_wl.items():
+        for uid, evs in user_evs.items():
+            ANTINUKE_EVENT_WHITELIST[gid][uid] = evs
+
+    # Anti-Spam
+    for gid, enabled in DB.load_all_antispam().items():
+        ANTISPAM_ENABLED[gid] = enabled
+
+    # Automod
+    for gid, cfg in DB.load_all_automod().items():
+        if cfg["settings"]:
+            AUTOMOD_SETTINGS[gid]    = cfg["settings"]
+        if cfg["punishment"]:
+            AUTOMOD_PUNISHMENT[gid]  = cfg["punishment"]
+        if cfg["wl_roles"]:
+            AUTOMOD_WL_ROLES[gid]    = cfg["wl_roles"]
+        if cfg["timeouts"]:
+            AUTOMOD_TIMEOUTS[gid]    = cfg["timeouts"]
+        if cfg["log_channel"]:
+            AUTOMOD_LOG_CHANNEL[gid] = cfg["log_channel"]
+
+    # Bot Admins
+    for gid, admins in DB.load_all_admins().items():
+        BOT_ADMINS[gid].update(admins)
+
+    # Warnings & Notes
+    for key, warns in DB.load_all_warns().items():
+        warn_map[key] = [{"reason": w["reason"], "mod": w["mod_id"], "time": w["timestamp"]} for w in warns]
+    for key, notes in DB.load_all_notes().items():
+        note_map[key] = [{"text": n["text"], "mod": n["mod_id"], "time": n["timestamp"]} for n in notes]
+
+    # Logs per-guild (stored in guild_settings)
+    for gid, cfg in all_settings.items():
+        # These are stored globally but DB has per-guild overrides
+        pass  # Log channels are set per-command; global .env fallback remains
+
+    # Load per-guild log channels into cache
+    for gid, cfg in all_settings.items():
+        _guild_logs[gid] = {
+            "bot_log":    cfg.get("bot_log")    or 0,
+            "mod_log":    cfg.get("mod_log")    or 0,
+            "invite_log": cfg.get("invite_log") or 0,
+            "ticket_log": cfg.get("ticket_log") or 0,
+        }
+
+    # Load verify configs
+    for gid, cfg in DB.load_all_verify_configs().items():
+        VERIFY_CONFIG[gid] = {
+            "verified_role":   cfg.get("verified_role")   or None,
+            "unverified_role": cfg.get("unverified_role") or None,
+            "verify_ch":       cfg.get("verify_channel")  or None,
+            "verify_log_ch":   cfg.get("log_channel")     or None,
+        }
+
+    print(f"[DB] Loaded: {len(ANTINUKE_ENABLED)} antinuke | {len(ANTISPAM_ENABLED)} antispam | {len(BOT_ADMINS)} admin configs | {len(GUILD_PREFIXES)} prefixes | {len(_guild_logs)} guilds")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_duration(s: str):
+    """Parse '10m', '2h', '1d' → timedelta or None"""
+    m = re.fullmatch(r"(\d+)(s|m|h|d|w)", s.lower())
+    if not m: return None
+    n, unit = int(m.group(1)), m.group(2)
+    return timedelta(**{"s": {"seconds": n}, "m": {"minutes": n},
+                        "h": {"hours": n}, "d": {"days": n}, "w": {"weeks": n}}[unit])
+
+def fmt_delta(td: timedelta) -> str:
+    total = int(td.total_seconds())
+    if total < 60:   return f"{total}s"
+    if total < 3600: return f"{total//60}m"
+    if total < 86400:return f"{total//3600}h"
+    return f"{total//86400}d"
+
+def time_ago(dt: datetime) -> str:
+    diff = datetime.now(timezone.utc) - dt
+    s = int(diff.total_seconds())
+    if s < 60:   return f"{s}s ago"
+    if s < 3600: return f"{s//60}m ago"
+    if s < 86400:return f"{s//3600}h ago"
+    return f"{s//86400}d ago"
+
+def ok_embed(msg: str) -> discord.Embed:
+    return discord.Embed(description=f"<a:Tick:1483344124357644350>  {msg}", color=0x57f287)
+
+def info_embed(title: str, msg: str) -> discord.Embed:
+    e = discord.Embed(title=title, description=msg, color=0x5865f2)
+    return e
+
+def err_embed(msg: str) -> discord.Embed:
+    return discord.Embed(description=f"<a:disabled1:1483344744024248453>  {msg}", color=C_ERROR)
+
+
+# guild_id → set of user_ids who are bot admins (can use most commands)
+BOT_ADMINS = defaultdict(set)  # guild_id → {user_id}
+
+def is_owner(ctx):
+    """Returns True only if the command invoker is the server owner."""
+    return ctx.author.id == ctx.guild.owner_id
+
+def is_bot_admin(ctx):
+    """Returns True if user is server owner, has admin perm, OR is a bot admin."""
+    if ctx.author.id == ctx.guild.owner_id:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    # Always fresh from DB
+    BOT_ADMINS[ctx.guild.id] = DB.admin_get(ctx.guild.id)
+    if ctx.author.id in BOT_ADMINS[ctx.guild.id]:
+        return True
+    return False
+
+def is_bot_admin_interaction(interaction: discord.Interaction):
+    """Slash version of is_bot_admin."""
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+    if interaction.user.guild_permissions.administrator:
+        return True
+    BOT_ADMINS[interaction.guild.id] = DB.admin_get(interaction.guild.id)
+    if interaction.user.id in BOT_ADMINS[interaction.guild.id]:
+        return True
+    return False
+
+def owner_only_error():
+    return discord.Embed(
+        title="<a:crown:1483340832429051995> Owner Only!",
+        description="This command can only be used by the **Server Owner**.",
+        color=0xff0000
+    )
+
+def bot_admin_error():
+    return discord.Embed(
+        title="🚫 No Permission!",
+        description="You need **Administrator** permission or to be a **Bot Admin** to use this command.\nAsk the server owner to run `$admin-add @you`.",
+        color=0xff0000
+    )
+
+async def send_mod_log(guild, action, target, target_id, mod, reason, color=None):
+    ch_id = _get_guild_log(guild.id, "mod_log") if hasattr(guild, "id") else 0
+    if not ch_id: return
+    ch = guild.get_channel(ch_id)
+    if not ch: return
+    e = discord.Embed(title=f"<a:Moderation:1483344127071486123> {action}", color=color or C_WARN, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="👤 Target",     value=f"{target} ({target_id})", inline=True)
+    e.add_field(name="<a:antinuke:1483344748990435370> Moderator", value=str(mod), inline=True)
+    e.add_field(name="📝 Reason",     value=reason or "No reason",    inline=False)
+    e.set_footer(text=f"ID: {target_id} • Empire Development™")
+    try:
+        await ch.send(embed=e)
+    except: pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TICKET VIEWS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Ticket Setup Modals ───────────────────────────────────────────────────────
+class TitleDescModal(discord.ui.Modal, title="Edit Title & Description"):
+    panel_title = discord.ui.TextInput(
+        label="Panel Title",
+        placeholder=f"{BOT_NAME} — Support Ticket",
+        max_length=100
+    )
+    panel_desc = discord.ui.TextInput(
+        label="Panel Description",
+        style=discord.TextStyle.paragraph,
+        placeholder="Describe when to open a ticket...",
+        max_length=800
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = get_panel_cfg(interaction.guild.id)
+        cfg["title"]       = self.panel_title.value
+        cfg["description"] = self.panel_desc.value
+        save_panel_cfg(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=ok_embed(f"Title & Description updated!\nRun `$ticket panel` to resend."),
+            ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=err_embed(f"Error: {error}"), ephemeral=True)
+        except:
+            pass
+
+
+class RulesModal(discord.ui.Modal, title="Edit Rules"):
+    rules_text = discord.ui.TextInput(
+        label="Rules (one per line)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Be patient\nNo spam\nRespect staff",
+        max_length=800
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lines = [r.strip() for r in self.rules_text.value.splitlines() if r.strip()]
+        cfg = get_panel_cfg(interaction.guild.id)
+        cfg["rules"] = lines
+        save_panel_cfg(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=ok_embed(f"{len(lines)} rules saved!\nRun `$ticket panel` to resend."),
+            ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=err_embed(f"Error: {error}"), ephemeral=True)
+        except:
+            pass
+
+
+class HoursFooterModal(discord.ui.Modal, title="Edit Hours & Footer"):
+    hours = discord.ui.TextInput(
+        label="Support Hours",
+        placeholder="11:30 AM to 11:30 PM",
+        max_length=100
+    )
+    footer = discord.ui.TextInput(
+        label="Footer Text",
+        placeholder="Empire | empire-bot.xyz",
+        max_length=80,
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = get_panel_cfg(interaction.guild.id)
+        cfg["support_hours"] = self.hours.value
+        if self.footer.value:
+            cfg["footer"] = self.footer.value
+        save_panel_cfg(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=ok_embed(f"Hours & Footer updated!\nRun `$ticket panel` to resend."),
+            ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=err_embed(f"Error: {error}"), ephemeral=True)
+        except:
+            pass
+
+
+class TicketSetupModal(discord.ui.Modal, title="Ticket Panel Setup"):
+    """Legacy - kept for compatibility"""
+    panel_title = discord.ui.TextInput(label="Panel Title", max_length=100)
+    panel_desc  = discord.ui.TextInput(label="Description", style=2, max_length=800)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = get_panel_cfg(interaction.guild.id)
+        cfg["title"]       = self.panel_title.value
+        cfg["description"] = self.panel_desc.value
+        save_panel_cfg(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=ok_embed("Panel updated! Run `$ticket panel` to resend."), ephemeral=True)
+
+
+# ── Set Category Modal ────────────────────────────────────────────────────────
+class SetCategoryModal(discord.ui.Modal, title="Set Ticket Category"):
+    ticket_type = discord.ui.TextInput(
+        label="Ticket Type (e.g. buy, partnership, support)",
+        placeholder="buy",
+        max_length=30
+    )
+    category_id = discord.ui.TextInput(
+        label="Discord Category ID",
+        placeholder="Right-click category → Copy ID",
+        max_length=30
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        key = self.ticket_type.value.strip().lower().replace(" ", "_")
+        _gcats = get_ticket_categories(interaction.guild.id)
+        if key not in _gcats:
+            cats = ", ".join(_gcats.keys())
+            return await interaction.response.send_message(
+                embed=err_embed(f"Type `{key}` not found.\nAvailable: {cats}"), ephemeral=True)
+        try:
+            cat_id = int(self.category_id.value.strip())
+            cat = interaction.guild.get_channel(cat_id)
+            if cat is None:
+                try:
+                    cat = await interaction.guild.fetch_channel(cat_id)
+                except Exception:
+                    cat = None
+            if not cat or not isinstance(cat, discord.CategoryChannel):
+                return await interaction.response.send_message(
+                    embed=err_embed("Category not found. Make sure the ID is correct and bot has access to it."), ephemeral=True)
+            _set_ticket_category(interaction.guild.id, key, cat_id)
+            emoji, label, _ = get_ticket_categories(interaction.guild.id).get(key, ("🎫", key, ""))
+            await interaction.response.send_message(
+                embed=ok_embed(f"**{emoji} {label}** tickets → **{cat.name}**"), ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=err_embed("Invalid ID. Enter a valid Category ID."), ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=err_embed(f"Error: {error}"), ephemeral=True)
+        except:
+            pass
+
+
+# ── Ping Role Modal ───────────────────────────────────────────────────────────
+class PingRoleModal(discord.ui.Modal, title="Set Ping Role"):
+    role_input = discord.ui.TextInput(
+        label="Role name, @mention, or ID",
+        placeholder="e.g. Staff  or  @Staff  or  123456789",
+        max_length=100,
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.role_input.value.strip()
+        if not val:
+            _TICKET_PING_ROLE[interaction.guild.id] = 0
+            await interaction.response.send_message(embed=ok_embed("Ping role removed."), ephemeral=True)
+            return
+
+        # Try to find role by mention, ID, or name
+        import re
+        role = None
+
+        # Check if it's a mention like <@&123>
+        mention_match = re.match(r"<@&(\d+)>", val)
+        if mention_match:
+            role = interaction.guild.get_role(int(mention_match.group(1)))
+
+        # Check if it's a plain ID
+        if not role and val.isdigit():
+            role = interaction.guild.get_role(int(val))
+
+        # Search by name (case insensitive)
+        if not role:
+            val_clean = val.lstrip("@")
+            role = discord.utils.find(lambda r: r.name.lower() == val_clean.lower(), interaction.guild.roles)
+
+        if not role:
+            # List available roles
+            role_list = ", ".join(f"`{r.name}`" for r in interaction.guild.roles if not r.is_default())
+            return await interaction.response.send_message(
+                embed=err_embed(f"Role not found: `{val}`\n\nAvailable roles:\n{role_list[:500]}"),
+                ephemeral=True)
+
+        _set_ticket_ping(interaction.guild_id, role.id)
+        DB.save_ticket_config(interaction.guild_id, ping_role=role.id)
+        await interaction.response.send_message(
+            embed=ok_embed(f"Ping role set to {role.mention}\nThis role will be pinged when a ticket is created."),
+            ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        try:
+            await interaction.response.send_message(embed=err_embed(f"Error: {error}"), ephemeral=True)
+        except:
+            pass
+
+
+# ── Setup Panel View (buttons) ─────────────────────────────────────────────────
+class TicketSetupView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=None)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=err_embed("Only the person who ran this command can use these buttons."),
+                ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Edit Title & Desc", style=discord.ButtonStyle.primary, row=0)
+    async def edit_title(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = TitleDescModal()
+        _cfg = get_panel_cfg(interaction.guild.id)
+        modal.panel_title.default = _cfg.get("title", "")
+        modal.panel_desc.default = _cfg.get("description", "")
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Edit Rules", style=discord.ButtonStyle.primary, row=0)
+    async def edit_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = RulesModal()
+        _cfg = get_panel_cfg(interaction.guild.id)
+        modal.rules_text.default = "\n".join(_cfg.get("rules", []))
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Edit Hours & Footer", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_hours(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = HoursFooterModal()
+        _cfg = get_panel_cfg(interaction.guild.id)
+        modal.hours.default = _cfg.get("support_hours", "")
+        modal.footer.default = _cfg.get("footer", "")
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Preview Panel", style=discord.ButtonStyle.success, row=1)
+    async def preview_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        e = build_panel_embed(interaction.guild)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="Set Ping Role", style=discord.ButtonStyle.secondary, row=2)
+    async def set_ping(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ask_msg = await interaction.channel.send(
+            f"{interaction.user.mention} 👋 Please **mention the role** you want to ping on ticket create.\nExample: `@Staff`\n-# This message will auto-delete in 30 seconds."
+        )
+        await interaction.response.send_message(embed=ok_embed("Please mention the role in chat!"), ephemeral=True)
+
+        def check(m):
+            return m.author.id == interaction.user.id and m.channel.id == interaction.channel.id and len(m.role_mentions) > 0
+
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30.0)
+            role = msg.role_mentions[0]
+            gid = interaction.guild.id
+            _TICKET_PING_ROLE[gid] = role.id
+            DB.save_ticket_config(gid, ping_role=role.id)
+            await msg.delete()
+            await ask_msg.delete()
+            await interaction.channel.send(embed=ok_embed(f"Ping role set to {role.mention} <a:Tick:1483344124357644350>"), delete_after=5)
+        except:
+            try:
+                await ask_msg.delete()
+            except:
+                pass
+
+    @discord.ui.button(label="Set Category", style=discord.ButtonStyle.secondary, row=2)
+    async def set_category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = SetCategoryModal()
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Send Panel Here", style=discord.ButtonStyle.danger, row=3)
+    async def send_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.channel.send(embed=build_panel_embed(interaction.guild), view=TicketOpenView(interaction.guild.id))
+        await interaction.response.send_message(embed=ok_embed("Ticket panel sent!"), ephemeral=True)
+
+
+# ── Ticket Categories (customize freely) ──────────────────────────────────────
+# Default categories — each guild gets its own copy
+_DEFAULT_CATEGORIES = {
+    "buy":         ("💰", "Buy/Purchase",         "Click on this option to create a ticket"),
+    "rewards":     ("<a:Gift:1483344100353642497>", "Claim Rewards",        "Click on this option to create a ticket"),
+    "partnership": ("🤝", "Ask For Partnership",  "Click on this option to create a ticket"),
+    "support":     ("<a:Announcement:1483344095228461056>", "Support Ticket", "Click on this option to create a ticket"),
+    "appeal":      ("⚖️", "Ban Appeal",           "Click on this option to create a ticket"),
+    "other":       ("<a:Moderation:1483344127071486123>", "Other",           "Click on this option to create a ticket"),
+}
+
+_GUILD_CATEGORIES = {}  # guild_id → {key: (emoji, label, desc)}
+
+def get_ticket_categories(guild_id: int) -> dict:
+    """Get per-guild ticket categories, loaded from DB or default."""
+    if guild_id not in _GUILD_CATEGORIES:
+        row = DB.get_ticket_config(guild_id)
+        saved = row.get("panel_rules")  # we reuse a field — actually use category_map
+        # Load saved cats from DB if any
+        import json
+        raw = DB.get_conn()
+        cur = raw.execute("SELECT ticket_cats FROM ticket_config WHERE guild_id=?", (guild_id,)).fetchone()
+        raw.close()
+        if cur and cur[0]:
+            try:
+                loaded = json.loads(cur[0])
+                _GUILD_CATEGORIES[guild_id] = {k: tuple(v) for k, v in loaded.items()}
+            except:
+                _GUILD_CATEGORIES[guild_id] = dict(_DEFAULT_CATEGORIES)
+        else:
+            _GUILD_CATEGORIES[guild_id] = dict(_DEFAULT_CATEGORIES)
+    return _GUILD_CATEGORIES[guild_id]
+
+def save_ticket_categories(guild_id: int):
+    """Save per-guild categories to DB."""
+    import json
+    cats = _GUILD_CATEGORIES.get(guild_id, {})
+    serialized = json.dumps({k: list(v) for k, v in cats.items()})
+    conn = DB.get_conn()
+    conn.execute("INSERT OR IGNORE INTO ticket_config (guild_id) VALUES (?)", (guild_id,))
+    conn.execute("UPDATE ticket_config SET ticket_cats=? WHERE guild_id=?", (serialized, guild_id))
+    conn.commit()
+    conn.close()
+
+# Legacy alias — points to default (only for places not yet migrated)
+TICKET_CATEGORIES = _DEFAULT_CATEGORIES
+
+
+# ── Per-category Discord category mapping: ticket_key → discord_category_id ────
+_TICKET_CATEGORY_MAP = defaultdict(dict)  # guild_id → {key: cat_id}
+
+def get_ticket_cat_map(guild_id: int) -> dict:
+    # Always read fresh from DB to stay in sync with _get_ticket_cfg
+    row = DB.get_ticket_config(guild_id)
+    _TICKET_CATEGORY_MAP[guild_id] = row.get("category_map", {}) or {}
+    return _TICKET_CATEGORY_MAP[guild_id]
+
+# Legacy alias (single-guild usage)
+TICKET_CATEGORY_MAP = {}
+
+# ── Panel config per-guild ──────────────────────────────────────────────────────
+_DEFAULT_PANEL = {
+    "title":        "",
+    "description":  "",
+    "rules":        [],
+    "support_hours": "",
+    "footer":        "",
+    "color":         0x5865f2,
+}
+_PANEL_CONFIGS = {}  # guild_id → dict
+
+def get_panel_cfg(guild_id: int) -> dict:
+    """Always fetch fresh from DB so dashboard changes reflect instantly."""
+    row = DB.get_ticket_config(guild_id)
+    _PANEL_CONFIGS[guild_id] = {
+        "title":         row.get("panel_title")   or "",
+        "description":   row.get("panel_desc")    or "",
+        "rules":         row.get("panel_rules")   or [],
+        "support_hours": row.get("support_hours") or "",
+        "footer":        row.get("footer")        or "",
+        "color":         _DEFAULT_PANEL["color"],
+    }
+    return _PANEL_CONFIGS[guild_id]
+
+def save_panel_cfg(guild_id: int):
+    cfg = _PANEL_CONFIGS.get(guild_id, {})
+    DB.save_ticket_config(guild_id,
+        panel_title   = cfg.get("title", ""),
+        panel_desc    = cfg.get("description", ""),
+        panel_rules   = cfg.get("rules", []),
+        support_hours = cfg.get("support_hours", ""),
+        footer        = cfg.get("footer", ""),
+    )
+
+# Legacy global (used by old single-server code — keep for compat)
+PANEL_CONFIG = _DEFAULT_PANEL
+
+# ── Welcome Config ─────────────────────────────────────────────────────────────
+def _get_welcome_cfg(guild_id: int, msg_type: str = 'join') -> dict:
+    """Always fresh from DB."""
+    return DB.get_welcome(guild_id, msg_type)
+
+def _build_welcome_embed(cfg: dict, member: discord.Member, guild: discord.Guild, msg_type: str = 'join') -> discord.Embed:
+    """Build embed from config dict — enhanced with rich info."""
+    def fmt(text: str) -> str:
+        boost_count = str(guild.premium_subscription_count or 0)
+        return (str(text or ''))\
+            .replace('{user}',        str(member))\
+            .replace('{mention}',     member.mention)\
+            .replace('{server}',      guild.name)\
+            .replace('{count}',       str(guild.member_count))\
+            .replace('{id}',          str(member.id))\
+            .replace('{tag}',         str(member))\
+            .replace('{created_at}',  member.created_at.strftime('%d %b %Y'))\
+            .replace('{boost_count}', boost_count)
+
+    try:
+        raw_color = cfg.get('color', '#57f287').lstrip('#')
+        embed_color = int(raw_color, 16)
+    except Exception:
+        embed_color = 0x57f287
+
+    # ── Account age badge ────────────────────────────────────────────────────
+    account_age_days = (datetime.now(timezone.utc) - member.created_at).days
+    if account_age_days < 3:
+        age_badge = "🔴 NEW ACCOUNT (<3 days)"
+        age_warn  = True
+    elif account_age_days < 30:
+        age_badge = f"🟡 {account_age_days} days old"
+        age_warn  = False
+    elif account_age_days < 365:
+        age_badge = f"🟢 {account_age_days} days old"
+        age_warn  = False
+    else:
+        years = account_age_days // 365
+        age_badge = f"✨ {years} year{'s' if years != 1 else ''} old"
+        age_warn  = False
+
+    # ── Member milestone ─────────────────────────────────────────────────────
+    mc = guild.member_count or 0
+    milestone_msg = ""
+    for ms in [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]:
+        if mc == ms:
+            milestone_msg = f"\n🎉 **{ms}th member milestone!** Congratulations!"
+            break
+
+    e = discord.Embed(color=embed_color)
+
+    # For join messages: title is sent as plain text separately (Carl-bot style)
+    # For leave/boost: keep title in embed as before
+    if msg_type != 'join':
+        title = fmt(cfg.get('title', ''))
+        if not title:
+            if msg_type == 'leave':
+                title = f"👋 {member.name} has left the server."
+            elif msg_type == 'boost':
+                title = f"🚀 {member.name} boosted the server!"
+        e.title = title
+
+    desc = fmt(cfg.get('description', ''))
+    if not desc:
+        if msg_type == 'join':
+            joined_ts = int(member.joined_at.timestamp()) if member.joined_at else int(__import__('time').time())
+            desc = (
+                f"Hey {member.mention}, welcome to **{guild.name}**! 🎉\n"
+                f"You are our **#{mc:,}** member.{milestone_msg}\n\n"
+                f"{'⚠️ ' if age_warn else ''}**Account Age:** {age_badge}"
+            )
+        elif msg_type == 'leave':
+            desc = f"**{member}** has left the server.\nWe now have **{mc:,}** members."
+        elif msg_type == 'boost':
+            desc = (
+                f"🚀 Thank you {member.mention} for boosting **{guild.name}**!\n"
+                f"We now have **{guild.premium_subscription_count or 0}** boosts — "
+                f"**Level {guild.premium_tier}**!"
+            )
+    elif msg_type == 'join' and age_warn:
+        desc = desc + f"\n\n⚠️ **Account Age:** {age_badge}"
+    e.description = desc
+
+    thumb = cfg.get('thumbnail', 'member')
+    if thumb == 'member':
+        e.set_thumbnail(url=member.display_avatar.url)
+    elif thumb == 'server' and guild.icon:
+        e.set_thumbnail(url=guild.icon.url)
+
+    img = cfg.get('image_url', '').strip()
+    if img: e.set_image(url=img)
+
+    footer = fmt(cfg.get('footer_text', ''))
+    if not footer:
+        footer = f"Empire Prime • {guild.name}"
+    e.set_footer(text=footer, icon_url=guild.icon.url if guild.icon else None)
+
+    if msg_type == 'join':
+        joined_ts = int(member.joined_at.timestamp()) if member.joined_at else int(__import__('time').time())
+        e.add_field(name='📅 Joined',       value=f'<t:{joined_ts}:R>',                           inline=True)
+        e.add_field(name='🎂 Account Age',  value=f'<t:{int(member.created_at.timestamp())}:D>',  inline=True)
+        e.add_field(name='👥 Member Count', value=f'**#{mc:,}**',                                 inline=True)
+    elif msg_type == 'boost' and cfg.get('show_fields'):
+        e.add_field(name='⚡ Boost Level',  value=f"Level {guild.premium_tier}",  inline=True)
+        e.add_field(name='💎 Total Boosts', value=str(guild.premium_subscription_count or 0), inline=True)
+    elif msg_type == 'leave' and cfg.get('show_fields'):
+        joined_ts = int(member.joined_at.timestamp()) if member.joined_at else None
+        if joined_ts:
+            e.add_field(name='⏱️ Was here since', value=f'<t:{joined_ts}:R>', inline=True)
+        e.add_field(name='👥 Members Left', value=f'{mc:,}', inline=True)
+
+    e.timestamp = datetime.now(timezone.utc)
+    return e
+
+# ── Per-guild ticket config helpers ───────────────────────────────────────────
+_GUILD_TICKET_CFG = {}  # guild_id → {ping_role, close_dm, category_map}
+
+def _get_ticket_cfg(guild_id: int) -> dict:
+    """Always fetch fresh from DB so dashboard changes reflect instantly."""
+    row = DB.get_ticket_config(guild_id)
+    _GUILD_TICKET_CFG[guild_id] = {
+        "ping_role":    row.get("ping_role", 0) or 0,
+        "close_dm":     row.get("close_dm", "") or "",
+        "category_map": row.get("category_map", {}) or {},
+    }
+    return _GUILD_TICKET_CFG[guild_id]
+
+def _set_ticket_ping(guild_id: int, role_id: int):
+    _get_ticket_cfg(guild_id)["ping_role"] = role_id
+    DB.save_ticket_config(guild_id, ping_role=role_id)
+
+def _set_ticket_close_dm(guild_id: int, msg: str):
+    _get_ticket_cfg(guild_id)["close_dm"] = msg
+    DB.save_ticket_config(guild_id, close_dm=msg)
+
+def _set_ticket_category(guild_id: int, key: str, cat_id: int):
+    # Fetch fresh config once, update in-memory, then save — avoids race condition
+    cfg = _get_ticket_cfg(guild_id)
+    cfg["category_map"][key] = cat_id
+    DB.save_ticket_config(guild_id, category_map=cfg["category_map"])
+    # Keep legacy cache in sync
+    _TICKET_CATEGORY_MAP[guild_id] = dict(cfg["category_map"])
+
+def _remove_ticket_category(guild_id: int, key: str):
+    cfg = _get_ticket_cfg(guild_id)
+    cfg["category_map"].pop(key, None)
+    DB.save_ticket_config(guild_id, category_map=cfg["category_map"])
+    # Keep legacy cache in sync
+    _TICKET_CATEGORY_MAP[guild_id] = dict(cfg["category_map"])
+
+# Per-guild log helpers
+def _guild_ticket_log(guild_id: int) -> int:
+    return _get_guild_log(guild_id, "ticket_log") if "_guild_logs" in globals() else 0
+
+def _guild_invite_log(guild_id: int) -> int:
+    return _get_guild_log(guild_id, "invite_log") if "_guild_logs" in globals() else 0
+
+
+class TicketCategorySelect(discord.ui.Select):
+    def __init__(self, guild_id: int = 0):
+        _cats = get_ticket_categories(guild_id) if guild_id else TICKET_CATEGORIES
+        options = [
+            discord.SelectOption(label=label, value=key, emoji=emoji, description=desc)
+            for key, (emoji, label, desc) in _cats.items()
+        ] or [discord.SelectOption(label="Support Ticket", value="support", emoji="🎫")]
+        super().__init__(placeholder="🎫 Select a topic...", min_values=1, max_values=1, options=options[:25])
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        key = self.values[0]
+        _gcats = get_ticket_categories(interaction.guild.id)
+        if key not in _gcats:
+            return await interaction.followup.send(embed=err_embed("Invalid ticket type."), ephemeral=True)
+        emoji, label, desc = _gcats[key]
+        guild = interaction.guild
+        user  = interaction.user
+
+
+
+        # ── Security: Blacklist check ─────────────────────────────────────────
+        bl = DB.is_ticket_blacklisted(guild.id, user.id)
+        if bl:
+            reason_txt = bl.get("reason") or "No reason given"
+            e_bl = discord.Embed(
+                title="🚫 Ticket Blacklisted",
+                description=(
+                    f"You have been **blacklisted** from opening tickets in **{guild.name}**.\n\n"
+                    f"**Reason:** {reason_txt}\n"
+                    f"**Since:** {bl.get('timestamp', 'Unknown')}\n\n"
+                    f"Contact an administrator if you believe this is a mistake."
+                ),
+                color=0xff0000
+            )
+            return await interaction.followup.send(embed=e_bl, ephemeral=True)
+
+        # ── Security: Cooldown check ──────────────────────────────────────────
+        now_dt = datetime.now(timezone.utc)
+        last_cd = ticket_cd.get((guild.id, user.id))
+        if last_cd:
+            elapsed = (now_dt - last_cd).total_seconds()
+            if elapsed < TICKET_COOLDOWN_S:
+                remaining = int(TICKET_COOLDOWN_S - elapsed)
+                e_cd = discord.Embed(
+                    title="⏳ Ticket Cooldown",
+                    description=f"Please wait **{remaining}s** before opening another ticket.",
+                    color=0xffa500
+                )
+                return await interaction.followup.send(embed=e_cd, ephemeral=True)
+
+        # ── Security: Minimum account age check ──────────────────────────────
+        _tcfg_sec = DB.get_ticket_config(guild.id)
+        _min_age = int(_tcfg_sec.get("min_account_age") or 0)
+        if _min_age > 0:
+            account_age = (now_dt - user.created_at).days
+            if account_age < _min_age:
+                e_age = discord.Embed(
+                    title="🔒 Account Too New",
+                    description=(
+                        f"Your account must be at least **{_min_age} days old** to open a ticket.\n"
+                        f"Your account is **{account_age} days** old.\n\n"
+                        f"This is to prevent spam and abuse."
+                    ),
+                    color=0xff6b6b
+                )
+                return await interaction.followup.send(embed=e_age, ephemeral=True)
+
+        # Duplicate check — per category (user can have one ticket per category)
+        safe_name = re.sub(r"[^a-z0-9]", "", user.name.lower())[:16]
+        existing = discord.utils.find(
+            lambda c: c.name.startswith(f"ticket-{safe_name}-{key}") and
+                      c.topic and str(user.id) in c.topic,
+            guild.text_channels)
+        if existing:
+            # Verify channel is actually accessible (not deleted/ghost)
+            try:
+                await existing.fetch_message(existing.last_message_id or existing.id)
+                real_exists = True
+            except Exception:
+                try:
+                    fetched = await guild.fetch_channel(existing.id)
+                    real_exists = fetched is not None
+                except Exception:
+                    real_exists = False
+            if real_exists:
+                return await interaction.followup.send(
+                    embed=err_embed(f"You already have an open **{label}** ticket: {existing.mention}"), ephemeral=True)
+
+        # Permission overwrites
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        }
+        if SUPPORT_ROLE_ID:
+            role = guild.get_role(SUPPORT_ROLE_ID)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+        # Use per-category Discord category if set, else fallback to default
+        cat_id = _get_ticket_cfg(guild.id)["category_map"].get(key)
+        # Convert to int safely (DB sometimes stores as string)
+        try:
+            cat_id = int(cat_id) if cat_id else 0
+        except (ValueError, TypeError):
+            cat_id = 0
+
+        category = None
+        if cat_id:
+            # Try cache first, then API fetch
+            category = guild.get_channel(cat_id)
+            if category is None:
+                try:
+                    category = await guild.fetch_channel(cat_id)
+                except Exception:
+                    category = None
+            # Must be a CategoryChannel
+            if not isinstance(category, discord.CategoryChannel):
+                category = None
+        ch = await guild.create_text_channel(
+            name=f"ticket-{safe_name}-{key}",
+            category=category,
+            topic=f"Ticket by {user} ({user.id}) | {label}",
+            overwrites=overwrites,
+        )
+
+        # Ticket embed — cool style
+        colors = [0x5865f2, 0xeb459e, 0x57f287, 0xfee75c, 0x00b0f4]
+        import hashlib
+        col = colors[int(hashlib.md5(str(user.id).encode()).hexdigest(), 16) % len(colors)]
+        e = discord.Embed(
+            title=f"{emoji}  {label}",
+            description=(
+                f"👋 Hey {user.mention}! Welcome to your support ticket.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 Please **describe your issue** in detail below.\n"
+                f"⏳ A staff member will assist you **shortly**.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"**Rules:**\n"
+                f"▸ Be patient & respectful\n"
+                f"▸ Do not ping staff repeatedly\n"
+                f"▸ All conversations are recorded"
+            ),
+            color=col, timestamp=datetime.now(timezone.utc)
+        )
+        e.add_field(name="🏷️ Category",  value=f"{emoji} {label}",  inline=True)
+        e.add_field(name="👤 Opened by", value=user.mention,          inline=True)
+        e.add_field(name="<a:clock:1483340836467900507> Time",      value=f"<t:{int(datetime.now(timezone.utc).timestamp())}:R>", inline=True)
+        e.set_footer(text="Empire Prime Support • $ticket close to close • Made by Black Belt")
+        e.set_thumbnail(url=user.display_avatar.url)
+
+        ping_content = None
+        _ping_rid = get_ticket_ping(guild.id)
+        if _ping_rid:
+            ping_content = f"<@&{_ping_rid}>"
+        ticket_created_at[ch.id] = datetime.now(timezone.utc)
+        ticket_cd[(guild.id, user.id)] = datetime.now(timezone.utc)  # start cooldown
+        await ch.send(
+            content=ping_content,
+            embed=e,
+            view=CloseTicketView()
+        )
+        await interaction.followup.send(
+            embed=ok_embed(f"Your ticket has been created: {ch.mention}"), ephemeral=True)
+
+        # Log
+        _tlog = _get_guild_log(guild.id, "ticket_log")
+        if _tlog:
+            log_ch = guild.get_channel(_tlog)
+            if log_ch:
+                created_ts = datetime.now(timezone.utc).strftime("%A, %d %B, %Y %H:%M")
+                le = discord.Embed(title="Ticket Created", color=C_TICKET)
+                le.description = f"{user.mention} created a ticket"
+                le.add_field(
+                    name="Ticket Information",
+                    value=(
+                        f"\u2502 **Ticket Name:** {label}-{user.name}\n"
+                        f"\u2502 **Ticket ID:** {ch.id}\n"
+                        f"\u2502 **Created At:** {created_ts}"
+                    ),
+                    inline=False
+                )
+                le.add_field(
+                    name="Creator Information",
+                    value=(
+                        f"\u2502 **Creator:** {user.mention}\n"
+                        f"\u2502 **Creator Username:** @{user.name}\n"
+                        f"\u2502 **Creator ID:** {user.id}"
+                    ),
+                    inline=False
+                )
+                le.set_footer(text=f"{BOT_NAME} | Made by Black Belt")
+                await log_ch.send(embed=le)
+
+
+class TicketOpenView(discord.ui.View):
+    def __init__(self, guild_id: int = 0):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Open a Ticket", style=discord.ButtonStyle.primary, emoji="🎫", custom_id="ticket_open")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = discord.ui.View(timeout=60)
+        view.add_item(TicketCategorySelect(interaction.guild.id))
+        await interaction.response.send_message(
+            "🎫 **Select a topic below to open your ticket:**", view=view, ephemeral=True)
+
+
+# ticket_claimed: channel_id → claimer_id
+ticket_claimed = {}
+# ticket_created_at: channel_id → datetime
+ticket_created_at = {}
+
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="ticket_claim_btn", row=0)
+    async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.guild.get_member(interaction.user.id)
+        is_admin = member.guild_permissions.administrator
+        has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in member.roles)
+        if not is_admin and not has_support:
+            return await interaction.response.send_message(
+                embed=err_embed("<a:disabled1:1483344744024248453> Only **Admins** or **Staff** can claim tickets."), ephemeral=True)
+
+        ch = interaction.channel
+        # Check if already claimed
+        if ch.id in ticket_claimed:
+            claimer_id = ticket_claimed[ch.id]
+            claimer = interaction.guild.get_member(claimer_id)
+            claimer_str = claimer.mention if claimer else f"<@{claimer_id}>"
+            return await interaction.response.send_message(
+                embed=err_embed(f"This ticket is already claimed by {claimer_str}."), ephemeral=True)
+
+        ticket_claimed[ch.id] = member.id
+
+        # Remove all other staff/support access, only claimer + ticket owner + bot + admin
+        new_overwrites = {}
+        for target, overwrite in ch.overwrites.items():
+            # Keep: bot, default_role, admins, ticket owner (has send_messages True explicitly)
+            if target == interaction.guild.me:
+                new_overwrites[target] = overwrite
+            elif target == interaction.guild.default_role:
+                new_overwrites[target] = overwrite
+            elif isinstance(target, discord.Member) and overwrite.view_channel == True:
+                # Keep ticket owner
+                new_overwrites[target] = overwrite
+            elif isinstance(target, discord.Role) and target.permissions.administrator:
+                new_overwrites[target] = overwrite
+            # Skip support role - they lose access after claim
+
+        # Add claimer explicitly
+        new_overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        cur_topic = ch.topic or ""
+        await ch.edit(overwrites=new_overwrites, topic=f"{cur_topic} | Claimed by {member}")
+
+        e = discord.Embed(
+            description=f"✋ Ticket claimed by {member.mention}\nOnly they can see this ticket now.",
+            color=C_SUCCESS,
+            timestamp=datetime.now(timezone.utc)
+        )
+        await interaction.response.send_message(embed=e)
+
+        # Update button to show claimed
+        button.label = f"Claimed by {member.display_name}"
+        button.disabled = True
+        button.style = discord.ButtonStyle.secondary
+        await interaction.message.edit(view=self)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close_btn", row=0)
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.guild.get_member(interaction.user.id)
+        is_admin = member.guild_permissions.administrator
+        has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in member.roles)
+        if not is_admin and not has_support:
+            return await interaction.response.send_message(
+                embed=err_embed("<a:disabled1:1483344744024248453> Only **Admins** or **Staff** can close tickets."), ephemeral=True)
+        e = discord.Embed(
+            title="🔒 Close Ticket?",
+            description="Are you sure you want to close this ticket?",
+            color=C_WARN
+        )
+        await interaction.response.send_message(embed=e, view=ConfirmCloseView(), ephemeral=True)
+
+
+class ConfirmCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = interaction.channel
+        guild = interaction.guild
+        closer = interaction.user
+
+        await interaction.response.send_message(
+            embed=discord.Embed(description="🔒 Closing in 5 seconds...", color=C_ERROR))
+
+        # ── Parse ticket info from topic ──────────────────────────────
+        topic = ch.topic or ""
+        creator = None
+        creator_id = None
+        import re
+        id_match = re.search(r"\((\d+)\)", topic)
+        if id_match:
+            creator_id = int(id_match.group(1))
+            creator = guild.get_member(creator_id)
+
+        # ── Generate transcript ───────────────────────────────────────
+        transcript_lines = [f"=== Ticket Transcript: {ch.name} ===\n"]
+        async for msg in ch.history(limit=500, oldest_first=True):
+            if msg.author.bot and not msg.embeds:
+                continue
+            ts = msg.created_at.strftime("%d/%m/%Y %H:%M")
+            if msg.content:
+                transcript_lines.append(f"[{ts}] {msg.author} ({msg.author.id}): {msg.content}")
+            for embed in msg.embeds:
+                if embed.description:
+                    transcript_lines.append(f"[{ts}] {msg.author} [Embed]: {embed.description[:200]}")
+            for att in msg.attachments:
+                transcript_lines.append(f"[{ts}] {msg.author} [File]: {att.url}")
+
+        transcript_text = "\n".join(transcript_lines)
+        transcript_bytes = transcript_text.encode("utf-8")
+        transcript_file = discord.File(
+            fp=__import__("io").BytesIO(transcript_bytes),
+            filename=f"transcript-{ch.name}.txt"
+        )
+
+        _tlog = _get_guild_log(guild.id, "ticket_log")
+        if _tlog:
+            log_ch = guild.get_channel(_tlog)
+            if log_ch:
+                le = discord.Embed(
+                    title="Ticket Closed",
+                    color=0x2b2d31,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                le.description = f"{closer.mention} closed a ticket."
+                le.add_field(
+                    name="Close Information",
+                    value=(
+                        f"\u2502 **Ticket Name:** {ch.name}\n"
+                        f"\u2502 **Ticket ID:** {ch.id}\n"
+                        f"\u2502 **Reason:** No further action required."
+                    ),
+                    inline=False
+                )
+                if creator:
+                    le.add_field(
+                        name="Creator Information",
+                        value=(
+                            f"\u2502 **Creator:** {creator.mention}\n"
+                            f"\u2502 **Creator Username:** @{creator.name}\n"
+                            f"\u2502 **Creator ID:** {creator.id}"
+                        ),
+                        inline=False
+                    )
+                le.add_field(
+                    name="Executor Information",
+                    value=(
+                        f"\u2502 **Executor:** {closer.mention}\n"
+                        f"\u2502 **Executor Username:** @{closer.name}\n"
+                        f"\u2502 **Executor ID:** {closer.id}"
+                    ),
+                    inline=False
+                )
+                le.set_footer(text="Made by Black Belt")
+
+                # Send transcript file separately
+                transcript_file2 = discord.File(
+                    fp=__import__("io").BytesIO(transcript_bytes),
+                    filename=f"transcript-{ch.name}.txt"
+                )
+                await log_ch.send(embed=le, file=transcript_file2)
+
+        # ── DM ticket creator ─────────────────────────────────────────
+        if creator:
+            try:
+                now = datetime.now(timezone.utc)
+                open_time = ch.created_at.strftime("%d %B %Y %H:%M")
+                close_time = now.strftime("%d %B %Y %H:%M")
+                # Get category/label from topic
+                topic = ch.topic or ""
+                cat_label = topic.split("|")[1].strip() if "|" in topic else ch.name
+
+                dm_e = discord.Embed(title="Ticket Closed", color=C_ERROR)
+                dm_e.description = f"Your ticket has been closed in **{guild.name}**!"
+                dm_e.add_field(
+                    name="Ticket Information",
+                    value=(
+                        f"\u2022 **Open Date:** {open_time}\n"
+                        f"\u2022 **Panel Name:** {cat_label}\n"
+                        f"\u2022 **Ticket Name:** {ch.name}"
+                    ),
+                    inline=False
+                )
+                dm_e.add_field(
+                    name="Close Information",
+                    value=(
+                        f"\u2022 **Closed By:** {closer.mention}\n"
+                        f"\u2022 **Close Date:** {close_time}\n"
+                        f"\u2022 **Close Reason:** Ticket was closed by staff."
+                    ),
+                    inline=False
+                )
+                dm_e.set_footer(text=f"If you have any further questions, feel free to open a new ticket. • Made by Black Belt")
+                await creator.send(embed=dm_e)
+            except:
+                pass
+
+        await asyncio.sleep(5)
+        await ch.delete(reason=f"Ticket closed by {closer}")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=ok_embed("Close cancelled."), view=None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  EVENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Status rotation ───────────────────────────────────────────────────────────
+STATUSES = [
+    "streaming:bot.strengthcloud.xyz",
+    "streaming:$help | Empire Prime",
+    "streaming:discord.gg/GAhhVPFZff",
+    "streaming:Made by Black Belt 👑",
+    "streaming:Protecting your server 🛡️",
+    "streaming:bot.strengthcloud.xyz",
+    "streaming:Empire Prime | $help",
+    "streaming:Type $help for commands",
+]
+
+async def auto_close_unclaimed_tickets():
+    """Auto-close tickets not claimed within 29 days."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = datetime.now(timezone.utc)
+        to_close = []
+        for ch_id, created in list(ticket_created_at.items()):
+            if ch_id in ticket_claimed:
+                continue  # Already claimed, skip
+            age_days = (now - created).days
+            if age_days >= 29:
+                to_close.append(ch_id)
+
+        for ch_id in to_close:
+            for guild in bot.guilds:
+                ch = guild.get_channel(ch_id)
+                if ch:
+                    try:
+                        e = discord.Embed(
+                            title="⏰ Auto-Closed",
+                            description="This ticket was **automatically closed** because no staff claimed it within **29 days**.",
+                            color=C_ERROR,
+                            timestamp=now
+                        )
+                        await ch.send(embed=e)
+                        await asyncio.sleep(10)
+                        await ch.delete(reason="Auto-closed: unclaimed for 29 days")
+                        ticket_created_at.pop(ch_id, None)
+                        _tlog = _get_guild_log(guild.id, "ticket_log")
+                        if _tlog:
+                            log_ch = guild.get_channel(_tlog)
+                            if log_ch:
+                                le = discord.Embed(title="⏰ Ticket Auto-Closed", color=C_ERROR, timestamp=now)
+                                le.add_field(name="Channel", value=ch.name, inline=True)
+                                le.add_field(name="Reason",  value="Unclaimed for 29 days", inline=True)
+                                await log_ch.send(embed=le)
+                    except:
+                        pass
+
+        await asyncio.sleep(3600)  # Check every hour
+
+
+async def rotate_status():
+    await bot.wait_until_ready()
+    idx = 0
+    while not bot.is_closed():
+        entry = STATUSES[idx % len(STATUSES)]
+        atype, aname = entry.split(":", 1)
+        if atype == "streaming":
+            activity = discord.Streaming(name=aname, url=STREAM_URL)
+            await bot.change_presence(status=discord.Status.online, activity=activity)
+        elif atype == "watching":
+            await bot.change_presence(status=discord.Status.online,
+                activity=discord.Activity(type=discord.ActivityType.watching, name=aname))
+        elif atype == "listening":
+            await bot.change_presence(status=discord.Status.online,
+                activity=discord.Activity(type=discord.ActivityType.listening, name=aname))
+        elif atype == "playing":
+            await bot.change_presence(status=discord.Status.online,
+                activity=discord.Game(name=aname))
+        idx += 1
+        await asyncio.sleep(30)
+
+
+@bot.event
+async def on_ready():
+    print(f"\n╔══════════════════════════════════════════════════════╗")
+    print(f"║       ✅  {bot.user} — Empire Prime ONLINE!       ")
+    print(f"║  📡  Serving {len(bot.guilds)} guild(s)")
+    print(f"║  🛡️  Anti-Nuke  │  👻 Ghost Ping  │  🚫 Anti-Spam")
+    print(f"║  🚔  Raid Shield │  ⚡ Auto-Punish  │  🎫 Tickets")
+    print(f"╚══════════════════════════════════════════════════════╝\n")
+
+    # ── Load all persistent data from DB ─────────────────────────────────────
+    _load_db_into_memory()
+
+    # Register persistent views
+    bot.add_view(TicketOpenView(0))  # guild_id=0 for persistent re-registration
+    bot.add_view(CloseTicketView())
+    bot.add_view(VerifyButton())     # Persistent verify button — survives restarts
+
+
+    # Cache invites
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            invite_cache[guild.id] = {inv.code: inv.uses for inv in invites}
+        except: pass
+
+    await bot.tree.sync()
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Streaming(
+            name="bot.strengthcloud.xyz | $help",
+            url=STREAM_URL
+        ))
+    bot.loop.create_task(rotate_status())
+    bot.loop.create_task(auto_close_unclaimed_tickets())
+    # Save guild names to DB so dashboard can display them
+    for _g in bot.guilds:
+        try:
+            _icon = str(_g.icon) if _g.icon else ""
+            DB.save_guild_name(_g.id, _g.name, _icon)
+        except: pass
+    print("[DB] All guild data loaded from database.")
+    print("✅  Slash commands synced.")
+
+
+@bot.event
+async def on_guild_join(guild):
+    """Initialize DB entry when bot joins a new server."""
+    DB.get_guild(guild.id)       # ensure row exists
+    DB.get_antinuke(guild.id)    # ensure antinuke row exists
+    # Save guild name for dashboard
+    try:
+        DB.save_guild_name(guild.id, guild.name, str(guild.icon) if guild.icon else "")
+    except: pass
+    print(f"[DB] Joined new guild: {guild.name} ({guild.id}) — initialized.")
+
+
+@bot.event
+async def on_guild_remove(guild):
+    """Log when bot is removed from a server."""
+    print(f"[BOT] Removed from guild: {guild.name} ({guild.id})")
+
+
+@bot.event
+async def on_invite_create(invite):
+    cache = invite_cache.setdefault(invite.guild.id, {})
+    cache[invite.code] = invite.uses
+
+
+@bot.event
+async def on_invite_delete(invite):
+    cache = invite_cache.get(invite.guild.id, {})
+    cache.pop(invite.code, None)
+
+
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+    try:
+        new_invites = await guild.invites()
+        old_cache   = invite_cache.get(guild.id, {})
+        used_invite = None
+
+        for inv in new_invites:
+            if old_cache.get(inv.code, 0) < inv.uses:
+                used_invite = inv
+                break
+
+        invite_cache[guild.id] = {inv.code: inv.uses for inv in new_invites}
+
+        if used_invite and used_invite.inviter:
+            iid      = used_invite.inviter.id
+            gkey     = (guild.id, member.id)
+            data     = invite_tracker[guild.id][iid]
+
+            # ── Fake: account age check using current FAKE_DAYS ──────────
+            account_age_days = (datetime.now(timezone.utc) - member.created_at).days
+            is_fake   = (FAKE_DAYS > 0) and (account_age_days < FAKE_DAYS)
+            is_rejoin = gkey in member_inviter
+
+            # Undo previous count if rejoin (someone left and rejoined)
+            if is_rejoin:
+                old_type = member_type.get(gkey, "real")
+                if old_type == "real":
+                    data["invites"] = max(0, data["invites"] - 1)
+                elif old_type == "fake":
+                    data["fake"]    = max(0, data["fake"] - 1)
+                # left was already incremented on leave, keep it
+
+            # Count new join
+            if is_fake:
+                data["fake"]    += 1
+            elif is_rejoin:
+                data["rejoins"] += 1
+            else:
+                data["invites"] += 1
+
+            member_inviter[gkey] = iid
+            member_type[gkey]    = "fake" if is_fake else ("rejoin" if is_rejoin else "real")
+
+            _ilog = _get_guild_log(guild.id, "invite_log")
+            if _ilog:
+                ch = guild.get_channel(_ilog)
+                if ch:
+                    total    = data["invites"]
+                    joins    = data["invites"] + data["rejoins"] + data["fake"]
+                    inv_word = "invites" if total != 1 else "invite"
+                    join_type = "<a:disabled1:1483344744024248453> FAKE" if is_fake else ("🔄 REJOIN" if is_rejoin else "<a:Tick:1483344124357644350> NEW")
+                    e = discord.Embed(color=0x2b2d31)
+                    e.set_author(name="Invite log")
+                    e.set_thumbnail(url=used_invite.inviter.display_avatar.url)
+                    e.description = (
+                        f"**\u00bb\u00bb {used_invite.inviter.display_name} has {total} {inv_word}**\n\n"
+                        f"**Joins :** {joins}\n"
+                        f"**Left :** {data['left']}\n"
+                        f"**Fake :** {data['fake']}\n"
+                        f"**Rejoins :** {data['rejoins']}"
+                    )
+                    e.set_footer(text=f"Joined: {member.display_name} \u2022 Today at {datetime.now().strftime('%H:%M')} • Made by Black Belt")
+                    await ch.send(embed=e)
+    except: pass
+
+
+
+
+
+# NOTE: on_message is handled in the Anti-Nuke section (includes AFK + security)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SLASH COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tree = bot.tree
+
+# ════════════════════ TICKET GROUP ════════════════════
+
+ticket_group = app_commands.Group(name="ticket", description="Ticket system")
+
+def build_panel_embed(guild) -> discord.Embed:
+    """Build the ticket panel embed from per-guild config — always fresh from DB."""
+    cfg = get_panel_cfg(guild.id)
+
+    title       = cfg.get("title", "").strip()
+    description = cfg.get("description", "").strip()
+    rules       = cfg.get("rules", [])
+    hours       = cfg.get("support_hours", "").strip()
+    footer      = cfg.get("footer", "").strip()
+
+    # Not configured yet — show setup prompt
+    if not title and not description:
+        e = discord.Embed(
+            title="🎫 Support Tickets",
+            description=(
+                "Click **Open a Ticket** below to contact our staff.\n\n"
+                "> *Admin: use `$ticket setup` or the dashboard to customize this panel.*"
+            ),
+            color=0x5865f2
+        )
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+        return e
+
+    # Build description parts
+    desc_parts = []
+    if description:
+        desc_parts.append(description)
+
+    if rules:
+        rules_text = "\n".join(f"• {r}" for r in rules if r.strip())
+        if rules_text:
+            desc_parts.append(f"\n🔷 **RULES TO FOLLOW:**\n{rules_text}")
+
+    if hours:
+        desc_parts.append(f"\n📅 **Support Timings:**\n• {hours}\n• Early Morning : No Support")
+
+    e = discord.Embed(
+        title=title,
+        description="\n".join(desc_parts) if desc_parts else "Open a ticket below.",
+        color=cfg.get("color", 0x5865f2)
+    )
+    if footer:
+        e.set_footer(text=footer, icon_url=guild.icon.url if guild.icon else None)
+    else:
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    return e
+
+
+@ticket_group.command(name="panel", description="Send the ticket panel (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_panel(interaction: discord.Interaction):
+    # Defer first to prevent Unknown Interaction (404) if channel.send takes too long
+    await interaction.response.defer(ephemeral=True)
+    await interaction.channel.send(embed=build_panel_embed(interaction.guild), view=TicketOpenView(interaction.guild.id))
+    await interaction.followup.send(embed=ok_embed("Ticket panel sent!"), ephemeral=True)
+
+
+@ticket_group.command(name="setup", description="Customize the ticket panel (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_setup(interaction: discord.Interaction):
+    cfg = get_panel_cfg(interaction.guild.id)
+    rules_preview = "\n".join(f"• {r}" for r in cfg["rules"]) or "None set"
+    e = discord.Embed(
+        title="⚙️ Ticket Panel Setup",
+        color=C_INFO,
+        description="Click the buttons below to customize your ticket panel."
+    )
+    e.add_field(name="📌 Current Title",  value=cfg["title"],         inline=False)
+    e.add_field(name="<a:clock:1483340836467900507> Support Hours",  value=cfg["support_hours"], inline=True)
+    e.add_field(name="📝 Footer",         value=cfg["footer"],        inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Rules",          value=rules_preview,        inline=False)
+    e.set_footer(text="Made by Black Belt")
+    await interaction.response.send_message(embed=e, view=TicketSetupView(interaction.user.id), ephemeral=True)
+
+
+@ticket_group.command(name="setrules", description="Set ticket panel rules (Admin) — separate with |")
+@app_commands.describe(rules="Rules separated by | e.g. Be patient | No spam | Respect staff")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_setrules(interaction: discord.Interaction, rules: str):
+    _cfg2 = get_panel_cfg(interaction.guild.id)
+    _cfg2["rules"] = [r.strip() for r in rules.split("|") if r.strip()]
+    save_panel_cfg(interaction.guild.id)
+    await interaction.response.send_message(
+        embed=ok_embed(f"Rules updated! {len(_cfg2['rules'])} rules set."), ephemeral=True)
+
+
+@ticket_group.command(name="sethours", description="Set support hours shown on panel (Admin)")
+@app_commands.describe(hours="e.g. 10:00 AM to 10:00 PM")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_sethours(interaction: discord.Interaction, hours: str):
+    _cfg = get_panel_cfg(interaction.guild.id)
+    _cfg["support_hours"] = hours
+    save_panel_cfg(interaction.guild.id)
+    await interaction.response.send_message(
+        embed=ok_embed(f"Support hours updated to: **{hours}**"), ephemeral=True)
+
+@ticket_group.command(name="close", description="Close this ticket")
+async def ticket_close(interaction: discord.Interaction):
+    if not interaction.channel.name.startswith("ticket-"):
+        return await interaction.response.send_message(
+            embed=err_embed("This is not a ticket channel."), ephemeral=True)
+    member = interaction.guild.get_member(interaction.user.id)
+    is_admin = member.guild_permissions.administrator
+    has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in member.roles)
+    if not is_admin and not has_support:
+        return await interaction.response.send_message(
+            embed=err_embed("<a:disabled1:1483344744024248453> Only **Admins** or **Staff** can close tickets."), ephemeral=True)
+    e = discord.Embed(title="🔒 Close Ticket?",
+                      description="Are you sure you want to close this ticket?", color=C_WARN)
+    await interaction.response.send_message(embed=e, view=ConfirmCloseView())
+
+@ticket_group.command(name="add", description="Add a user to the ticket")
+@app_commands.describe(user="User to add")
+async def ticket_add(interaction: discord.Interaction, user: discord.Member):
+    # Allow if admin, support role, or ticket owner (their ID in topic)
+    member = interaction.guild.get_member(interaction.user.id)
+    is_admin = member.guild_permissions.administrator
+    has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in member.roles)
+    is_owner = interaction.channel.topic and str(interaction.user.id) in interaction.channel.topic
+    if not is_admin and not has_support and not is_owner:
+        return await interaction.response.send_message(
+            embed=err_embed("Only the ticket owner or staff can add users."), ephemeral=True)
+    await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
+    await interaction.response.send_message(embed=ok_embed(f"Added {user.mention} to the ticket."))
+
+@ticket_group.command(name="remove", description="Remove a user from the ticket")
+@app_commands.describe(user="User to remove")
+async def ticket_remove(interaction: discord.Interaction, user: discord.Member):
+    await interaction.channel.set_permissions(user, view_channel=False)
+    await interaction.response.send_message(embed=ok_embed(f"Removed {user.mention} from the ticket."))
+
+@ticket_group.command(name="rename", description="Rename the ticket channel")
+@app_commands.describe(name="New channel name")
+async def ticket_rename(interaction: discord.Interaction, name: str):
+    clean = re.sub(r"\s+", "-", name.lower())
+    await interaction.channel.edit(name=clean)
+    await interaction.response.send_message(embed=ok_embed(f"Renamed to `{clean}`."))
+
+@ticket_group.command(name="claim", description="Claim this ticket (staff)")
+async def ticket_claim(interaction: discord.Interaction):
+    await interaction.channel.edit(topic=f"Claimed by {interaction.user}")
+    e = discord.Embed(description=f"<a:Tick:1483344124357644350> Ticket claimed by {interaction.user.mention}.", color=C_SUCCESS)
+    await interaction.response.send_message(embed=e)
+
+tree.add_command(ticket_group)
+
+# ════════════════════ AFK ════════════════════
+
+@tree.command(name="afk", description="Set your AFK status")
+@app_commands.describe(reason="AFK reason")
+async def afk_cmd(interaction: discord.Interaction, reason: str = "AFK"):
+    afk_map[interaction.user.id] = {"reason": reason, "time": datetime.now(timezone.utc)}
+    try:
+        member = interaction.guild.get_member(interaction.user.id)
+        nick = member.nick or member.name
+        if not nick.startswith("[AFK] "):
+            await member.edit(nick=f"[AFK] {nick[:24]}")
+    except: pass
+    e = discord.Embed(title="💤 AFK Set",
+                      description=f"You are now AFK.\n**Reason:** {reason}",
+                      color=C_AFK, timestamp=datetime.now(timezone.utc))
+    e.set_footer(text="You'll be unset when you send a message. • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+# ════════════════════ MODERATION ════════════════════
+
+@tree.command(name="timeout", description="Timeout a member")
+@app_commands.describe(user="Member", duration="Duration e.g. 10m 1h 2d", reason="Reason")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def timeout_cmd(interaction: discord.Interaction, user: discord.Member,
+                      duration: str, reason: str = "No reason provided"):
+    td = parse_duration(duration)
+    if not td:
+        return await interaction.response.send_message(
+            embed=err_embed("Invalid duration. Use e.g. `10m`, `1h`, `2d`."), ephemeral=True)
+    if td > timedelta(days=28):
+        return await interaction.response.send_message(
+            embed=err_embed("Max timeout is 28 days."), ephemeral=True)
+    try:
+        until = datetime.now(timezone.utc) + td
+        await user.timeout(until, reason=reason)
+        e = discord.Embed(title="<a:clock:1483340836467900507> Member Timed Out", color=C_WARN, timestamp=datetime.now(timezone.utc))
+        e.add_field(name="Member",    value=f"{user.mention} ({user.id})", inline=True)
+        e.add_field(name="Duration",  value=fmt_delta(td),                inline=True)
+        e.add_field(name="Reason",    value=reason,                       inline=False)
+        e.add_field(name="Moderator", value=interaction.user.mention,     inline=True)
+        await interaction.response.send_message(embed=e)
+        await send_mod_log(interaction.guild, "Timeout", user, user.id,
+                           interaction.user, reason, C_WARN)
+    except Exception as ex:
+        await interaction.response.send_message(embed=err_embed(str(ex)), ephemeral=True)
+
+@tree.command(name="untimeout", description="Remove timeout from a member")
+@app_commands.describe(user="Member")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def untimeout_cmd(interaction: discord.Interaction, user: discord.Member):
+    try:
+        await user.timeout(None)
+        await interaction.response.send_message(embed=ok_embed(f"Removed timeout from {user.mention}."))
+        await send_mod_log(interaction.guild, "Un-Timeout", user, user.id,
+                           interaction.user, "Manual remove", C_SUCCESS)
+    except Exception as ex:
+        await interaction.response.send_message(embed=err_embed(str(ex)), ephemeral=True)
+
+@tree.command(name="kick", description="Kick a member")
+@app_commands.describe(user="Member", reason="Reason")
+@app_commands.checks.has_permissions(kick_members=True)
+async def kick_cmd(interaction: discord.Interaction, user: discord.Member,
+                   reason: str = "No reason provided"):
+    try:
+        await user.kick(reason=reason)
+        await interaction.response.send_message(
+            embed=ok_embed(f"👢 Kicked **{user}** | Reason: {reason}"))
+        await send_mod_log(interaction.guild, "Kick", user, user.id,
+                           interaction.user, reason, C_ERROR)
+    except Exception as ex:
+        await interaction.response.send_message(embed=err_embed(str(ex)), ephemeral=True)
+
+@tree.command(name="ban", description="Ban a member")
+@app_commands.describe(user="Member", reason="Reason", delete_days="Delete messages (0-7 days)")
+@app_commands.checks.has_permissions(ban_members=True)
+async def ban_cmd(interaction: discord.Interaction, user: discord.Member,
+                  reason: str = "No reason provided", delete_days: int = 0):
+    try:
+        await user.ban(reason=reason, delete_message_days=min(delete_days, 7))
+        await interaction.response.send_message(
+            embed=ok_embed(f"<a:ARedArrow:1483344139452940338> Banned **{user}** | Reason: {reason}"))
+        await send_mod_log(interaction.guild, "Ban", user, user.id,
+                           interaction.user, reason, C_ERROR)
+    except Exception as ex:
+        await interaction.response.send_message(embed=err_embed(str(ex)), ephemeral=True)
+
+@tree.command(name="unban", description="Unban a user by ID")
+@app_commands.describe(user_id="User ID to unban")
+@app_commands.checks.has_permissions(ban_members=True)
+async def unban_cmd(interaction: discord.Interaction, user_id: str):
+    try:
+        await interaction.guild.unban(discord.Object(int(user_id)))
+        await interaction.response.send_message(embed=ok_embed(f"Unbanned user `{user_id}`."))
+        await send_mod_log(interaction.guild, "Unban", user_id, user_id,
+                           interaction.user, "Manual unban", C_SUCCESS)
+    except Exception as ex:
+        await interaction.response.send_message(embed=err_embed(str(ex)), ephemeral=True)
+
+@tree.command(name="warn", description="Warn a member")
+@app_commands.describe(user="Member", reason="Reason")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warn_cmd(interaction: discord.Interaction, user: discord.Member, reason: str):
+    key = (interaction.guild.id, user.id)
+    warn_map[key].append({"reason": reason, "mod": str(interaction.user), "time": datetime.now(timezone.utc)})
+    DB.warn_add(key[0], key[1], reason, interaction.user.id)
+    count = len(warn_map[key])
+    e = discord.Embed(title="⚠️ Warning Issued", color=C_WARN, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="User",   value=f"{user.mention} ({user.id})", inline=True)
+    e.add_field(name="Warn #", value=str(count),                   inline=True)
+    e.add_field(name="Reason", value=reason,                       inline=False)
+    try: await user.send(embed=e)
+    except: pass
+    await interaction.response.send_message(embed=e)
+    await send_mod_log(interaction.guild, "Warn", user, user.id,
+                       interaction.user, reason, C_WARN)
+
+@tree.command(name="warnings", description="View warnings of a member")
+@app_commands.describe(user="Member")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warnings_cmd(interaction: discord.Interaction, user: discord.Member):
+    key  = (interaction.guild.id, user.id)
+    warns = warn_map.get(key, [])
+    if not warns:
+        return await interaction.response.send_message(
+            embed=ok_embed(f"{user} has no warnings."))
+    lines = "\n\n".join(
+        f"**#{i+1}** — {w['reason']}\n> by {w['mod']} • <t:{int(w['time'].timestamp())}:R>"
+        for i, w in enumerate(warns))
+    e = discord.Embed(title=f"⚠️ Warnings for {user}", description=lines,
+                      color=C_WARN)
+    e.set_footer(text=f"Total: {len(warns)} • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="clearwarns", description="Clear all warnings for a member")
+@app_commands.describe(user="Member")
+@app_commands.checks.has_permissions(administrator=True)
+async def clearwarns_cmd(interaction: discord.Interaction, user: discord.Member):
+    warn_map.pop((interaction.guild.id, user.id), None)
+    await interaction.response.send_message(embed=ok_embed(f"Cleared all warnings for {user.mention}."))
+
+@tree.command(name="purge", description="Delete multiple messages")
+@app_commands.describe(amount="Messages to delete (1-100)", user="Only from this user")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def purge_cmd(interaction: discord.Interaction, amount: int,
+                    user: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    amount = max(1, min(amount, 100))
+    check  = (lambda m: m.author == user) if user else None
+    deleted = await interaction.channel.purge(limit=amount, check=check,
+                                               before=interaction.created_at)
+    await interaction.followup.send(embed=ok_embed(f"Deleted **{len(deleted)}** message(s)."))
+
+@tree.command(name="lock", description="Lock a channel")
+@app_commands.describe(channel="Channel to lock (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def lock_cmd(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(interaction.guild.default_role, send_messages=False)
+    e = discord.Embed(description=f"🔒 {ch.mention} has been **locked**.", color=C_ERROR)
+    await interaction.response.send_message(embed=e)
+    if ch != interaction.channel:
+        await ch.send(embed=e)
+
+@tree.command(name="unlock", description="Unlock a channel")
+@app_commands.describe(channel="Channel to unlock (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unlock_cmd(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(interaction.guild.default_role, send_messages=None)
+    e = discord.Embed(description=f"🔓 {ch.mention} has been **unlocked**.", color=C_SUCCESS)
+    await interaction.response.send_message(embed=e)
+    if ch != interaction.channel:
+        await ch.send(embed=e)
+
+@tree.command(name="slowmode", description="Set channel slowmode")
+@app_commands.describe(seconds="Seconds (0 to disable)", channel="Channel (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slowmode_cmd(interaction: discord.Interaction, seconds: int,
+                       channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.edit(slowmode_delay=max(0, min(seconds, 21600)))
+    msg = f"Slowmode disabled in {ch.mention}." if seconds == 0 \
+        else f"Slowmode set to **{seconds}s** in {ch.mention}."
+    await interaction.response.send_message(embed=ok_embed(msg))
+
+@tree.command(name="note", description="Add or view staff notes on a user")
+@app_commands.describe(user="Member", text="Note text (leave blank to view notes)")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def note_cmd(interaction: discord.Interaction, user: discord.Member,
+                   text: str = None):
+    key = (interaction.guild.id, user.id)
+    if not text:
+        notes = note_map.get(key, [])
+        if not notes:
+            return await interaction.response.send_message(
+                embed=ok_embed(f"No notes for {user}."), ephemeral=True)
+        lines = "\n\n".join(
+            f"**#{i+1}** — {n['text']}\n> by {n['mod']} • <t:{int(n['time'].timestamp())}:R>"
+            for i, n in enumerate(notes))
+        e = discord.Embed(title=f"📝 Notes for {user}", description=lines, color=C_INFO)
+        return await interaction.response.send_message(embed=e, ephemeral=True)
+    note_map[key].append({"text": text, "mod": str(interaction.user), "time": datetime.now(timezone.utc)})
+    DB.note_add(key[0], key[1], text, interaction.user.id)
+    await interaction.response.send_message(
+        embed=ok_embed(f"Note added for {user.mention}."), ephemeral=True)
+
+# ════════════════════ INVITE TRACKING ════════════════════
+
+@tree.command(name="invites", description="Check invite stats for a user")
+@app_commands.describe(user="User (default: yourself)")
+async def invites_cmd(interaction: discord.Interaction, user: discord.Member = None):
+    await interaction.response.defer()
+    target   = user or interaction.guild.get_member(interaction.user.id)
+    data     = invite_tracker[interaction.guild.id][target.id]
+    total    = data["invites"]
+    joins    = data["invites"] + data["rejoins"]
+    left     = data["left"]
+    fake     = data["fake"]
+    rejoins  = data["rejoins"]
+    time_str = datetime.now().strftime("%H:%M")
+
+    e = discord.Embed(color=0x2b2d31)
+    e.set_author(name="Invite log")
+    e.set_thumbnail(url=target.display_avatar.url)
+    inv_word = "invites" if total != 1 else "invite"
+    e.description = (
+        f"**\u00bb\u00bb {target.display_name} has {total} {inv_word}**\n\n"
+        f"**Joins :** {joins}\n"
+        f"**Left :** {left}\n"
+        f"**Fake :** {fake}\n"
+        f"**Rejoins :** {rejoins}"
+    )
+    e.set_footer(text=f"Requested by {interaction.user.display_name} \u2022 Today at {time_str} • Made by Black Belt")
+    await interaction.followup.send(embed=e)
+
+@tree.command(name="inviteboard", description="Top invite leaderboard")
+async def inviteboard_cmd(interaction: discord.Interaction):
+    gdata  = invite_tracker.get(interaction.guild.id, {})
+    sorted_data = sorted(gdata.items(), key=lambda x: x[1]["invites"], reverse=True)[:10]
+    if not sorted_data:
+        return await interaction.response.send_message(
+            embed=err_embed("No invite data yet."), ephemeral=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = [f"{medals[i] if i < 3 else f'**{i+1}.**'} <@{uid}> — **{d['invites']}** invites"
+              for i, (uid, d) in enumerate(sorted_data)]
+    e = discord.Embed(title="<a:Announcement:1483344095228461056> Invite Leaderboard", description="\n".join(lines),
+                      color=C_INVITE, timestamp=datetime.now(timezone.utc))
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="resetinvites", description="Reset invite count for a user (Admin)")
+@app_commands.describe(user="User to reset")
+@app_commands.checks.has_permissions(administrator=True)
+async def resetinvites_cmd(interaction: discord.Interaction, user: discord.Member):
+    invite_tracker[interaction.guild.id].pop(user.id, None)
+    await interaction.response.send_message(
+        embed=ok_embed(f"Reset invite count for {user.mention}."))
+
+# ════════════════════ UTILITY ════════════════════
+
+@tree.command(name="userinfo", description="View info about a user")
+@app_commands.describe(user="User (default: yourself)")
+async def userinfo_cmd(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.guild.get_member(interaction.user.id)
+    roles  = [r.mention for r in target.roles if r != interaction.guild.default_role]
+    e = discord.Embed(title=f"👤 {target}", color=C_PRIMARY, timestamp=datetime.now(timezone.utc))
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.add_field(name="ID",             value=str(target.id), inline=True)
+    e.add_field(name="Bot",            value="Yes" if target.bot else "No", inline=True)
+    e.add_field(name="Account Created",
+                value=f"<t:{int(target.created_at.timestamp())}:R>", inline=True)
+    e.add_field(name="Joined Server",
+                value=f"<t:{int(target.joined_at.timestamp())}:R>" if target.joined_at else "N/A", inline=True)
+    e.add_field(name="Roles",
+                value=" ".join(roles) if roles else "None", inline=False)
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="serverinfo", description="View detailed server information")
+async def serverinfo_cmd(interaction: discord.Interaction):
+    g = interaction.guild
+    text_ch  = len([c for c in g.channels if isinstance(c, discord.TextChannel)])
+    voice_ch = len([c for c in g.channels if isinstance(c, discord.VoiceChannel)])
+    cats     = len([c for c in g.channels if isinstance(c, discord.CategoryChannel)])
+    vl = str(g.verification_level).replace("_", " ").title()
+    afk_timeout = f"{g.afk_timeout} sec" if g.afk_timeout else "None"
+    e = discord.Embed(
+        title="🖥️ Server Information",
+        description=f"> {g.description or g.name}",
+        color=C_PRIMARY,
+        timestamp=datetime.now(timezone.utc)
+    )
+    if g.icon:
+        e.set_thumbnail(url=g.icon.url)
+    e.add_field(name="📋 General Info", inline=False, value=(
+        f"**Name:** {g.name}\n"
+        f"**Server ID:** {g.id}\n"
+        f"**Owner:** <@{g.owner_id}>\n"
+        f"**Created:** <t:{int(g.created_at.timestamp())}:R> • {g.created_at.strftime('%d %B %Y %H:%M')}"
+    ))
+    e.add_field(name="👥 Members & Roles", inline=True, value=(
+        f"**Members:** {g.member_count:,}\n"
+        f"**Roles:** {len(g.roles)}\n"
+        f"**Verification Level:** {vl}\n"
+        f"**AFK Timeout:** {afk_timeout}"
+    ))
+    e.add_field(name="💎 Boost Status", inline=True, value=(
+        f"**Level:** {g.premium_tier}\n"
+        f"**Boosts:** {g.premium_subscription_count}"
+    ))
+    e.add_field(name="📁 Channels", inline=False, value=(
+        f"**Text:** {text_ch}\n"
+        f"**Voice:** {voice_ch}\n"
+        f"**Categories:** {cats}"
+    ))
+    e.set_footer(text=f"Requested by {interaction.user} • Today at {datetime.now().strftime('%H:%M')}", icon_url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="avatar", description="Get avatar of a user")
+@app_commands.describe(user="User (default: yourself)")
+async def avatar_cmd(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    e = discord.Embed(title=f"🖼️ {target.display_name}'s Avatar", color=C_PRIMARY)
+    e.set_image(url=target.display_avatar.replace(size=1024).url)
+    e.url = target.display_avatar.replace(size=4096).url
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="ping", description="Check bot latency")
+async def ping_cmd(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)
+    e = discord.Embed(title="🏓 Pong!", color=C_INFO)
+    e.add_field(name="Bot Latency", value=f"{latency}ms",  inline=True)
+    e.add_field(name="API Latency", value=f"{latency}ms",  inline=True)
+    await interaction.response.send_message(embed=e)
+
+@tree.command(name="botinfo", description="View bot info and feature list")
+async def botinfo_cmd(interaction: discord.Interaction):
+    e = discord.Embed(
+        title=f"🤖 {BOT_NAME} Bot",
+        description=f"A full-featured Discord bot for {BOT_NAME} community management.",
+        color=C_PRIMARY, timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=bot.user.display_avatar.url)
+    e.add_field(
+        name="<a:Moderation:1483344127071486123> Features",
+        value=(
+            "<a:Announcement:1483344095228461056> **Ticket System** — Multi-category support tickets\n"
+            "<a:clock:1483340836467900507> **Timeout System** — Flexible duration moderation\n"
+            "💤 **AFK System** — Auto nick update + ping reply\n"
+            "<a:Announcement:1483344095228461056> **Invite Tracking** — Leaderboard & per-invite stats\n"
+            "⚠️ **Warn System** — DM warnings with history\n"
+            "🔒 **Lock / Unlock** — Channel management\n"
+            "🗑️ **Purge** — Bulk message deletion\n"
+            "🔇 **Slowmode** — Rate limit control\n"
+            "📝 **Staff Notes** — Private notes on members\n"
+            "📊 **Userinfo / Serverinfo** — Quick lookups"
+        ), inline=False
+    )
+    e.add_field(name="Servers", value=str(len(bot.guilds)),    inline=True)
+    e.add_field(name="Users",   value=str(len(bot.users)),     inline=True)
+    await interaction.response.send_message(embed=e)
+
+# ─── Global error handler ───────────────────────────────────────────────────
+@tree.error
+async def on_app_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            embed=err_embed("You don't have permission to use this command."), ephemeral=True)
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        await interaction.response.send_message(
+            embed=err_embed(f"I'm missing permissions: {error.missing_permissions}"), ephemeral=True)
+    else:
+        print(f"[ERROR] {error}")
+        try:
+            await interaction.response.send_message(
+                embed=err_embed(f"An error occurred: {error}"), ephemeral=True)
+        except: pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PREFIX COMMANDS  (! wala)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── !help ──────────────────────────────────────────────────────────────────────
+
+# ── Help Category Select ──────────────────────────────────────────────────────
+# Public categories (everyone)
+HELP_CATEGORIES = [
+    discord.SelectOption(label="Index",          value="index",    emoji="🏠", description="How to use the bot"),
+    discord.SelectOption(label="Anti-Nuke",      value="antinuke", emoji="<a:antinuke:1483344748990435370>", description="Anti-nuke & raid protection"),
+    discord.SelectOption(label="⭐ Premium",      value="premium",  emoji="⭐", description="All premium commands"),
+    discord.SelectOption(label="Automod",        value="automod",  emoji="🤖", description="Auto-moderate messages"),
+    discord.SelectOption(label="Security",       value="security", emoji="🔐", description="Server security tools"),
+    discord.SelectOption(label="Ticket System",  value="ticket",   emoji="<a:Announcement:1483344095228461056>", description="Ticket commands & setup"),
+    discord.SelectOption(label="Moderation",     value="mod",      emoji="<a:antinuke:1483344748990435370>", description="Ban, kick, warn, timeout"),
+    discord.SelectOption(label="Invite Logging", value="invite",   emoji="<a:Announcement:1483344095228461056>", description="Invite tracking feature"),
+    discord.SelectOption(label="Giveaways",      value="giveaway", emoji="<a:Gift:1483344100353642497>", description="Giveaway system"),
+    discord.SelectOption(label="Timer",          value="timer",    emoji="<a:clock:1483340836467900507>", description="Timer feature"),
+    discord.SelectOption(label="AFK",            value="afk",      emoji="💤", description="AFK system"),
+    discord.SelectOption(label="Utility",        value="util",     emoji="🔧", description="Useful commands"),
+    discord.SelectOption(label="Logs",           value="logs",     emoji="<a:Moderation:1483344127071486123>", description="Ticket & bot log setup"),
+    discord.SelectOption(label="Verification",   value="verify",   emoji="<a:antinuke:1483344748990435370>", description="Member verification system"),
+    discord.SelectOption(label="Welcome",        value="welcome",  emoji="👋", description="Join, leave & boost messages"),
+]
+
+# Owner-only category (added dynamically)
+HELP_OWNER_CATEGORY = discord.SelectOption(
+    label="Admin System", value="admin", emoji="<a:crown:1483340832429051995>", description="Bot admin management"
+)
+
+def get_help_embed(value: str, guild) -> discord.Embed:
+    P = GUILD_PREFIXES.get(guild.id, "$") if guild else "$"
+    if value == "index":
+        e = discord.Embed(title=f"<a:crown:1483340832429051995> {BOT_NAME} — Commands", color=C_PRIMARY)
+        e.description = (
+            f"**Hey there! My prefix in this server is `{P}`**\n"
+            f"Use the **dropdown below** to browse all commands.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<a:antinuke:1483344748990435370> **Anti-Nuke** — Protect from nukers, raiders & ghost pings\n"
+            f"⭐ **Premium** — Giveaways, Levels, Reaction Roles & more\n"
+            f"🚫 **Anti-Spam** — Auto-timeout spammers\n"
+            f"🔐 **Security** — Server security audit tools\n"
+            f"<a:Announcement:1483344095228461056> **Ticket System** — Support ticket management\n"
+            f"<a:antinuke:1483344748990435370> **Moderation** — Ban, kick, warn, timeout\n"
+            f"<a:Announcement:1483344095228461056> **Invite Logging** — Track who invited who\n"
+            f"<a:clock:1483340836467900507> **Timer** — Set timers\n"
+            f"💤 **AFK** — AFK status system\n"
+            f"🔧 **Utility** — Userinfo, avatar, ping\n"
+            f"<a:Moderation:1483344127071486123> **Logs** — Set ticket & bot log channels\n"
+            f"<a:antinuke:1483344748990435370> **Verification** — Member verification system\n"
+            f"👋 **Welcome** — Join, leave & boost messages\n"
+        )
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.set_footer(text=f"{BOT_NAME} • Prefix: {P} • Made by Black Belt")
+
+    elif value == "antinuke":
+        e = discord.Embed(title="<a:antinuke:1483344748990435370> Anti-Nuke & Raid Protection", color=0x5865f2)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Auto-punish nukers, block raids, detect ghost pings — protect your server 24/7.**"
+        e.add_field(name="🔧 Setup:", inline=False, value=(
+            f"`{P}antinuke enable` — Turn on Anti-Nuke\n"
+            f"`{P}antinuke disable` — Turn off Anti-Nuke\n"
+            f"`{P}antinuke setlog #channel` — Set alert log channel\n"
+            f"`{P}antinuke setpunish ban/kick/strip` — Choose punishment mode\n"
+            f"`{P}antinuke raid on/off` — Toggle raid shield\n"
+            f"`{P}antinuke test` — Test if alerts are working"
+        ))
+        e.add_field(name="👤 User Whitelist:", inline=False, value=(
+            f"`{P}antinuke whitelist @user` — Whitelist a user\n"
+            f"`{P}antinuke unwhitelist @user` — Remove user from whitelist\n"
+            f"`{P}antinuke wllist` — View all whitelisted users & roles"
+        ))
+        e.add_field(name="🎭 Role Whitelist:", inline=False, value=(
+            f"`{P}antinuke wlrole @role` — Whitelist entire role\n"
+            f"`{P}antinuke unwlrole @role` — Remove role from whitelist\n"
+            f"`{P}antinuke wllist` — View full whitelist"
+        ))
+        e.add_field(name="🔒 Lockdown:", inline=False, value=(
+            f"`{P}antinuke lock` — Manually lock all channels\n"
+            f"`{P}antinuke unlock` — Lift server lockdown\n"
+            f"`{P}antinuke status` — Full security status\n"
+            f"`{P}antinuke thresholds` — View auto-ban limits"
+        ))
+        e.add_field(name="🚫 Anti-Spam:", inline=False, value=(
+            f"`{P}antispam on` — Enable anti-spam protection\n"
+            f"`{P}antispam off` — Disable anti-spam\n"
+            f"Triggers on `{SPAM_MSG_MAX}+` msgs in `{SPAM_MSG_WIN}s` → **{SPAM_TIMEOUT_MINS} min timeout**"
+        ))
+        e.add_field(name="🤖 Auto-Detection:", inline=False, value=(
+            f"▸ Mass ban/kick → **Auto-punish attacker**\n"
+            f"▸ Channel/role mass delete → **Auto-punish**\n"
+            f"▸ Webhook spam → **Auto-punish**\n"
+            f"▸ @everyone spam → **Auto-punish**\n"
+            f"▸ Unauthorized bot add → **Alert + Auto-punish**\n"
+            f"▸ 8+ joins in 5s → **Auto-lockdown (Raid Shield)**\n"
+            f"▸ Command spam → **5 min timeout**\n"
+            f"▸ Ghost ping detected → **Alert in log channel**\n"
+            f"▸ Repeat ghost ping (3x/30s) → **10 min timeout**"
+        ))
+        e.set_footer(text="Empire Prime Anti-Nuke • Made by Black Belt")
+
+    elif value == "security":
+        e = discord.Embed(title="🔐 Security Tools", color=0x00ff88)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Advanced audit & inspection tools for server admins.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}security audit` — Recent suspicious audit log actions\n"
+            f"`{P}security admins` — List all members with dangerous perms\n"
+            f"`{P}security bots` — List all bots in server\n"
+            f"`{P}security newmembers [days]` — Recent joiners (default 7d)\n"
+            f"`{P}security checkreps` — Find overpowered roles\n"
+            f"`{P}security clearblocked` — Clear rate-limited users\n"
+            f"`{P}security resetpunished` — Reset auto-ban list (this session)"
+        ))
+        e.set_footer(text="Empire Prime Security • Made by Black Belt")
+
+    elif value == "ticket":
+        _hcats = get_ticket_categories(guild.id) if guild else TICKET_CATEGORIES
+        cats = " · ".join(f"{em} {lbl}" for _, (em, lbl, _) in list(_hcats.items())[:6])
+        e = discord.Embed(title="<a:Announcement:1483344095228461056> Ticket System", color=C_TICKET)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Manage support tickets with categories & logging.**"
+        e.add_field(name="Panel Commands:", inline=False, value=(
+            f"`{P}ticket panel` — Send ticket panel *(Admin)*\n"
+            f"`{P}ticket setup` — Customize panel interactively *(Admin)*"
+        ))
+        e.add_field(name="Ticket Commands:", inline=False, value=(
+            f"`{P}ticket close` — Close & delete the ticket *(Staff)*\n"
+            f"`{P}ticket claim` — Claim ticket *(Staff)*\n"
+            f"`{P}ticket add @user` — Add user to ticket\n"
+            f"`{P}ticket remove @user` — Remove user from ticket\n"
+            f"`{P}ticket rename <n>` — Rename the ticket channel"
+        ))
+        e.add_field(name="Setup Commands:", inline=False, value=(
+            f"`{P}ticket setclosedm <msg>` — Set DM on close *(Admin)*\n"
+            f"Placeholders: `{{ticket_name}}` `{{closer}}`\n"
+            f"`{P}ticket setping @role` — Set ping role *(Admin)*\n"
+            f"`{P}ticket setcategory <type> #cat` — Set Discord category *(Admin)*\n"
+            f"`{P}ticket addcat <emoji> <n>` — Add ticket type *(Admin)*\n"
+            f"`{P}ticket removecat <n>` — Remove ticket type *(Admin)*\n"
+            f"`{P}ticket listcats` — List all ticket types"
+        ))
+        e.add_field(name="Categories:", inline=False, value=cats or "No categories set")
+        e.set_footer(text=f"{BOT_NAME} Bot • Prefix: $ • {len(TICKET_CATEGORIES)} categories • Made by Black Belt")
+
+    elif value == "mod":
+        e = discord.Embed(title="<a:antinuke:1483344748990435370> Moderation", color=C_ERROR)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Moderation commands. Requires appropriate permissions.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}ban @user [reason]` — Ban a member\n"
+            f"`{P}unban <id>` — Unban by ID\n"
+            f"`{P}kick @user [reason]` — Kick a member\n"
+            f"`{P}timeout @u 10m [reason]` — Timeout\n"
+            f"`{P}untimeout @user` — Remove timeout\n"
+            f"`{P}warn @user <reason>` — Warn (DMs user)\n"
+            f"`{P}warnings @user` — View warnings\n"
+            f"`{P}clearwarns @user` — Clear all warnings\n"
+            f"`{P}purge <1-100>` — Bulk delete messages\n"
+            f"`{P}lock / {P}unlock` — Lock/unlock channel\n"
+            f"`{P}slowmode <sec>` — Set slowmode\n"
+            f"`{P}note @user [text]` — Staff notes"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "invite":
+        e = discord.Embed(title="<a:Announcement:1483344095228461056> Invite Logging", color=C_INVITE)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Track who invited who to the server.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}i [@user]` — Invite stats (joins/left/fake/rejoins)\n"
+            f"`{P}invited [@user]` — List of who they invited\n"
+            f"`{P}lb` — Invite leaderboard\n"
+            f"`{P}resetinvites @user` — Reset invite count *(Admin)*"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "giveaway":
+        e = discord.Embed(title="<a:Gift:1483344100353642497> Giveaways", color=discord.Color.gold())
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Run and manage giveaways easily.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}gstart <time> <winners> <prize>` — Start a giveaway\n"
+            f"Example: `{P}gstart 1h 2 Nitro`\n"
+            f"`{P}gend <msg_id>` — End giveaway early\n"
+            f"`{P}greroll <msg_id>` — Reroll new winner"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "timer":
+        e = discord.Embed(title="<a:clock:1483340836467900507> Timer", color=discord.Color.orange())
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Set timers — bot will ping you when done.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}tstart <duration> <label>` — Set a timer\n"
+            f"Example: `{P}tstart 30m Study Break`\n"
+            f"Durations: `10s` `5m` `2h` `1d`"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "afk":
+        e = discord.Embed(title="💤 AFK System", color=C_AFK)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Set yourself as AFK.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}afk [reason]` — Set AFK status\n"
+            f"• Adds `[AFK]` prefix to nickname\n"
+            f"• Auto-replies when someone pings you\n"
+            f"• Auto-removes when you send a message"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "util":
+        e = discord.Embed(title="🔧 Utility", color=C_INFO)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Useful commands for everyone.**"
+        e.add_field(name="Commands:", inline=False, value=(
+            f"`{P}userinfo [@user]` — Detailed user info\n"
+            f"`{P}serverinfo` (`{P}si`) — Detailed server info\n"
+            f"`{P}mc` — Member count\n"
+            f"`{P}accage <id/@u>` — Account age\n"
+            f"`{P}avatar [@user]` — Get user avatar\n"
+            f"`{P}ping` — Bot latency\n"
+            f"`{P}botinfo` — Bot features"
+        ))
+
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+
+    elif value == "automod":
+        e = discord.Embed(title="🤖 Automod System", color=0xff6600)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Automatically moderate messages in your server.**"
+        e.add_field(name="⚡ Quick Setup:", inline=False, value=(
+            f"`{P}automod enable` — Enable ALL automod features at once\n"
+            f"`{P}automod disable` — Disable ALL automod features\n"
+            f"`{P}automod status` — View current automod status"
+        ))
+        e.add_field(name="🔧 Individual Toggles:", inline=False, value=(
+            f"`{P}automod caps on/off` — Block excessive CAPS (70%+ caps)\n"
+            f"`{P}automod links on/off` — Block all links\n"
+            f"`{P}automod discordlinks on/off` — Block ALL Discord links (discord.gg)\n`{P}automod invites on/off` — Block Discord invite links\n"
+            f"`{P}automod spam on/off` — Block message spam (7 msgs/5s)\n"
+            f"`{P}automod emoji on/off` — Block emoji spam (10+ emojis)\n"
+            f"`{P}automod nsfw on/off` — Block NSFW/adult links\n"
+            f"`{P}automod extapps on/off` — Block external bot links\n"
+            f"`{P}automod token on/off` — Block Discord token posting\n"
+            f"`{P}automod mention on/off` — Block mass @mentions\n"
+            f"`{P}automod settimeout <feature> <mins>` — Set timeout duration"
+        ))
+        e.add_field(name="<a:Moderation:1483344127071486123> Automod Logs:", inline=False, value=(
+            "All automod actions are logged to your `antinuke-logs` channel.\n"
+            "Each log shows: **User, Action, Channel, Reason**"
+        ))
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+
+    elif value == "logs":
+        e = discord.Embed(title="<a:Moderation:1483344127071486123> Log Setup", color=C_INFO)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Set channels for all bot logs — tickets, mod, bot, invites, anti-nuke.**"
+        e.add_field(name="⚡ All-in-One:", inline=False, value=(
+            f"`{P}setuplogs` — Interactive setup panel (recommended)\n"
+            f"`{P}setuplogs all #channel` — Set ALL logs to one channel instantly"
+        ))
+        e.add_field(name="🔧 Individual:", inline=False, value=(
+            f"`{P}setticketlog #channel` — Ticket log *(Admin)*\n"
+            f"`{P}setbotlog #channel` — Bot log *(Admin)*\n"
+            f"`{P}setmodlog #channel` — Mod log *(Admin)*\n"
+            f"`{P}setinvitelog #channel` — Invite log *(Admin)*\n"
+            f"`{P}antinuke setlog #channel` — Anti-Nuke alert log *(Admin)*"
+        ))
+        e.set_footer(text="Empire Prime • Prefix: $ • Made by Black Belt")
+    elif value == "verify":
+        e = discord.Embed(title="<a:antinuke:1483344748990435370> Verification System", color=0x5865f2)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Auto-verify members with roles and log channels.**"
+        e.add_field(name="⚡ Quick Setup:", inline=False, value=(
+            f"`{P}verify setup` — Auto-create roles + channels + panel (Owner only)\n"
+            f"`{P}verify panel` — Send verify panel to current channel\n"
+            f"`{P}verify status` — View current config"
+        ))
+        e.add_field(name="🔧 Manual Setup:", inline=False, value=(
+            f"`{P}verify setrole @Verified @Unverified` — Set roles\n"
+            f"`{P}verify setchannel #channel` — Set verify channel\n"
+            f"`{P}verify setlog #channel` — Set log channel"
+        ))
+        e.add_field(name="⚙️ How it works:", inline=False, value=(
+            "▸ New member joins → gets `Unverified` role\n"
+            "▸ They can only see `#verify-here`\n"
+            "▸ Click **Verify Me** button → get `Verified` role\n"
+            "▸ Verify log shows: ID, warnings, account age, invites"
+        ))
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+
+    elif value == "hide":
+        e = discord.Embed(title="<a:disabled1:1483344744024248453> Hide / Unhide Channels", color=0xed4245)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Hide or unhide channels from everyone, roles, or specific members.**"
+        e.add_field(name="Hide Commands:", inline=False, value=(
+            f"`{P}hide` — Hide current channel from everyone\n"
+            f"`{P}hide #channel` — Hide specific channel\n"
+            f"`{P}hide role @role` — Hide channel from a role\n"
+            f"`{P}hide member @user` — Hide channel from a member\n"
+            f"`{P}hide all` — Hide ALL channels from everyone\n"
+        ))
+        e.add_field(name="Unhide Commands:", inline=False, value=(
+            f"`{P}unhide` — Unhide current channel\n"
+            f"`{P}unhide #channel` — Unhide specific channel\n"
+            f"`{P}unhideall` — Unhide ALL channels\n"
+        ))
+        e.add_field(name="Slash Commands:", inline=False, value=(
+            "`/hide` `/unhide`\n"
+            "`/hide-role` `/unhide-role`\n"
+            "`/hide-member`\n"
+            "`/hide-all` `/unhide-all`"
+        ))
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+
+    elif value == "welcome":
+        e = discord.Embed(title="👋 Welcome Messages", color=0x57f287)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Auto-send rich embeds when members join, leave or boost your server.**\n\nAll settings are managed from the **Dashboard** — no commands needed!"
+        e.add_field(name="📥 Join Messages", inline=False, value=(
+            "Sent when a new member joins the server.\n"
+            "Configure in Dashboard → 👋 Welcome → 📥 Join"
+        ))
+        e.add_field(name="📤 Leave Messages", inline=False, value=(
+            "Sent when a member leaves the server.\n"
+            "Configure in Dashboard → 👋 Welcome → 📤 Leave"
+        ))
+        e.add_field(name="🚀 Boost Messages", inline=False, value=(
+            "Sent when a member boosts the server.\n"
+            "Configure in Dashboard → 👋 Welcome → 🚀 Boost"
+        ))
+        e.add_field(name="🎨 Customizable Fields", inline=False, value=(
+            "`Title` • `Description` • `Color` • `Thumbnail` • `Banner Image` • `Footer`\n"
+            "`Info Fields` (Joined, Account age, Member #)"
+        ))
+        e.add_field(name="📝 Variables", inline=False, value=(
+            f"`{{mention}}` `{{user}}` `{{server}}` `{{count}}` `{{id}}` `{{created_at}}` `{{boost_count}}`"
+        ))
+        e.add_field(name="🌐 Setup", inline=False, value=(
+            f"Go to **bot.strengthcloud.xyz** → Login → Select Server → **Welcome** tab\n"
+            f"Enable join/leave/boost messages and customize the embed."
+        ))
+        e.set_footer(text=f"{BOT_NAME} Bot • Dashboard: bot.strengthcloud.xyz")
+
+    elif value == "admin":
+        e = discord.Embed(title="<a:crown:1483340832429051995> Admin System", color=0xffd700)
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.description = "**Give trusted users access to bot commands without Discord Admin permission.**"
+        e.add_field(name="<a:crown:1483340832429051995> Owner Only Commands:", inline=False, value=(
+            f"`{P}admin-add @user` — Add a bot admin\n"
+            f"`{P}admin-remove @user` — Remove a bot admin\n"
+            f"`{P}admin-list` — View all bot admins"
+        ))
+        e.add_field(name="<a:Tick:1483344124357644350> Bot Admins Can Use:", inline=False, value=(
+            "▸ All moderation commands (ban, kick, warn, timeout)\n"
+            "▸ Ticket commands\n"
+            "▸ Invite tracking\n"
+            "▸ AFK, Giveaways, Utility\n"
+            "▸ Automod individual toggles\n"
+            "▸ Antinuke whitelist/status"
+        ))
+        e.add_field(name="<a:disabled1:1483344744024248453> Bot Admins CANNOT Use:", inline=False, value=(
+            "▸ `$antinuke enable/disable` — Owner only\n"
+            "▸ `$automod enable/disable` — Owner only\n"
+            "▸ `$verify setup` — Owner only\n"
+            "▸ `$admin-add/remove` — Owner only"
+        ))
+        e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+
+    elif value == "premium":
+        e = discord.Embed(
+            title="<a:crown:1483340832429051995> Empire Prime — Premium Commands",
+            color=0xfee75c
+        )
+        e.set_thumbnail(url=guild.me.display_avatar.url if guild else None)
+        e.description = "**All premium features are unlocked and available for everyone!**"
+        e.add_field(name="☢️ Nuke Recovery", inline=False, value=(
+            f"`{P}nukerecovery on` — Enable auto nuke recovery\n"
+            f"`{P}nukerecovery off` — Disable nuke recovery\n"
+            f"`{P}nukerecovery status` — View current status\n"
+            f"`{P}backup create` — Save a server snapshot\n"
+            f"`{P}backup info` — View saved backup info"
+        ))
+        e.add_field(name="📥 Server Import (VIP / Owner Only)", inline=False, value=(
+            f"`{P}importbackup <backup_id>` — Import backup into this server\n"
+            f"`{P}listbackups` — View all your saved backup IDs\n"
+            f"⚠️ Only **Server Owner** can use this feature\n"
+            f"📌 Backup ID milta hai `{P}backup create` ke baad — save it!"
+        ))
+        e.add_field(name="<a:Gift:1483344100353642497> Giveaways", inline=False, value=(
+            f"`{P}gstart <dur> <winners> <prize>` — Start a giveaway\n"
+            f"`{P}gend <msg_id>` — End giveaway early\n"
+            f"`{P}greroll <msg_id>` — Re-roll winner"
+        ))
+        e.add_field(name="🏆 Level System", inline=False, value=(
+            f"`{P}rank` — View your level & XP\n"
+            f"`{P}leaderboard` — Server XP leaderboard\n"
+            f"`{P}setlevel on/off` — Enable/disable leveling\n"
+            f"`{P}setlevel channel #ch` — Set levelup channel\n"
+            f"`{P}setlevel addrole <lvl> @role` — Add level reward role"
+        ))
+        e.add_field(name="🎭 Reaction Roles", inline=False, value=(
+            f"`{P}rr add <msg_id> <emoji> @role` — Add reaction role\n"
+            f"`{P}rr remove <msg_id> <emoji>` — Remove reaction role\n"
+            f"`{P}rr list` — List all reaction roles\n"
+            f"💡 Tip: **Reply** to a message and use `{P}rr add 🎉 @role` — no ID needed!"
+        ))
+        e.add_field(name="⚡ Auto React", inline=False, value=(
+            f"`{P}autoreact set #channel 👍 ❤️` — Auto-react to all msgs in channel\n"
+            f"`{P}autoreact remove #channel` — Remove autoreact\n"
+            f"`{P}autoreact list` — Show all autoreact channels"
+        ))
+        e.add_field(name="💬 Word React", inline=False, value=(
+            f"`{P}wordreact add <word> 👍 ❤️` — React when someone says a word\n"
+            f"Example: `{P}wr add hii 🎉` — someone types 'hii' → 🎉 lage\n"
+            f"`{P}wordreact remove <word>` — Remove\n"
+            f"`{P}wordreact list` — Show all"
+        ))
+        e.add_field(name="🤖 Auto Role", inline=False, value=(
+            f"`{P}autorole add @role` — Auto-assign role on join\n"
+            f"`{P}autorole remove @role` — Remove autorole\n"
+            f"`{P}autorole list` — View all autoroles"
+        ))
+        e.add_field(name="📊 Polls", inline=False, value=(
+            f"`{P}poll <dur> Question | Option1 | Option2` — Create a poll"
+        ))
+        e.add_field(name="🔊 Temp VC", inline=False, value=(
+            f"`{P}tempvc set #hub` — Set hub channel for temp VCs\n"
+            f"`{P}tempvc off` — Disable temp VC"
+        ))
+        e.add_field(name="📌 Sticky", inline=False, value=(
+            f"`{P}sticky set <text>` — Stick a message in channel\n"
+            f"`{P}sticky remove` — Remove sticky message"
+        ))
+        e.add_field(name="🔔 Reminder", inline=False, value=(
+            f"`{P}remind <dur> <what>` — Set a reminder (e.g. `{P}remind 1h Meeting`)"
+        ))
+        e.add_field(name="💬 Auto Responder", inline=False, value=(
+            f"`{P}ar add <trigger> <reply>` — Add auto response\n"
+            f"`{P}ar remove <trigger>` — Remove trigger\n"
+            f"`{P}ar list` — View all triggers"
+        ))
+        e.add_field(name="🌟 Welcome (Premium)", inline=False, value=(
+            f"`{P}setwelcome channel #ch` — Set welcome channel\n"
+            f"`{P}setwelcome message <text>` — Custom welcome message\n"
+            f"`{P}setwelcome dm <text>` — Welcome DM to new members\n"
+            f"`{P}setwelcome color <hex>` — Set embed color\n"
+            f"`{P}setwelcome test` — Test welcome message"
+        ))
+        e.add_field(name="🔍 Snipe", inline=False, value=(
+            f"`{P}snipe` — See last deleted message\n"
+            f"`{P}editsnipe` — See last edited message"
+        ))
+
+    else:
+        e = discord.Embed(title="❓ Unknown", color=C_ERROR, description="Select a category from the dropdown.")
+
+    if not e.footer or not e.footer.text:
+        e.set_footer(text=f"{BOT_NAME} • Prefix: {P} • Made by Black Belt")
+    return e
+
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, guild, is_owner: bool = False):
+        self.guild = guild
+        # Add owner-only Admin System category only for server owner
+        opts = list(HELP_CATEGORIES)
+        if is_owner:
+            opts.append(HELP_OWNER_CATEGORY)
+        super().__init__(
+            placeholder="Select a category...",
+            min_values=1, max_values=1,
+            options=opts,
+            custom_id="help_select_persistent"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # Only the original $help user can use this dropdown
+        if interaction.user.id != self.view.author_id:
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    description="<a:disabled1:1483344744024248453> **This help menu belongs to the user who ran `$help`.**\nPlease run your own `$help` command.",
+                    color=0xff0000
+                ), ephemeral=True)
+        val = self.values[0]
+        if val == "admin" and interaction.user.id != interaction.guild.owner_id:
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    description="<a:crown:1483340832429051995> **Owner Only!**\nOnly the server owner can view this section.",
+                    color=0xff0000
+                ), ephemeral=True)
+        e = get_help_embed(val, self.view.guild)
+        try:
+            await interaction.response.edit_message(embed=e, view=self.view)
+        except discord.errors.NotFound:
+            await interaction.response.send_message(embed=e, ephemeral=True)
+        except discord.errors.InteractionResponded:
+            pass
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, guild, author_id: int, is_owner: bool = False):
+        super().__init__(timeout=300)  # 5 min then auto-expire
+        self.guild = guild
+        self.author_id = author_id
+        self.message = None
+        self.add_item(HelpSelect(guild, is_owner=is_owner))
+        # Link buttons row
+        self.add_item(discord.ui.Button(label="Support server", emoji="💬", url=SUPPORT_SERVER_URL, style=discord.ButtonStyle.link, row=1))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        try:
+            await self.message.edit(view=self)
+        except Exception:
+            pass
+
+
+@bot.command(name="help", aliases=["h", "commands", "cmds"])
+async def help_cmd(ctx, category: str = None):
+    # Default: show index
+    val = category.lower() if category else "index"
+    owner = (ctx.author.id == ctx.guild.owner_id)
+
+    # Block non-owners from admin page
+    if val == "admin" and not owner:
+        return await ctx.send(embed=discord.Embed(
+            description="<a:crown:1483340832429051995> **Owner Only!**\nOnly the server owner can view the Admin System section.",
+            color=0xff0000
+        ), delete_after=8)
+
+    e = get_help_embed(val, ctx.guild)
+
+    # Add Admin System to index only for owner
+    if val == "index" and owner:
+        e.description += "\n<a:crown:1483340832429051995> **Admin System** — Bot admin management *(Owner only)*"
+
+    view = HelpView(ctx.guild, author_id=ctx.author.id, is_owner=owner)
+    msg = await ctx.send(embed=e, view=view)
+    view.message = msg  # Store so on_timeout can disable buttons
+
+
+# ── !ticket ────────────────────────────────────────────────────────────────────
+@bot.group(name="ticket", invoke_without_command=True)
+async def ticket_prefix(ctx):
+    await ctx.send(embed=err_embed("Usage: `$ticket panel / close / add / remove / rename / claim`"))
+
+@ticket_prefix.command(name="panel")
+@commands.has_permissions(administrator=True)
+async def tp_panel(ctx):
+    await ctx.channel.send(embed=build_panel_embed(ctx.guild), view=TicketOpenView(ctx.guild.id))
+    await ctx.send(embed=ok_embed("Ticket panel sent!"), delete_after=5)
+
+
+@ticket_prefix.command(name="setup")
+@commands.has_permissions(administrator=True)
+async def tp_setup(ctx):
+    cfg = get_panel_cfg(ctx.guild.id)
+    rules_preview = "\n".join(f"• {r}" for r in cfg["rules"]) or "None set"
+    e = discord.Embed(
+        title="⚙️ Ticket Panel Setup",
+        color=C_INFO,
+        description="Click the buttons below to customize your ticket panel."
+    )
+    e.add_field(name="📌 Current Title",    value=cfg["title"],           inline=False)
+    e.add_field(name="<a:clock:1483340836467900507> Support Hours",    value=cfg["support_hours"],   inline=True)
+    e.add_field(name="📝 Footer",           value=cfg["footer"],          inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Rules",            value=rules_preview,          inline=False)
+    e.set_footer(text="Made by Black Belt")
+    await ctx.send(embed=e, view=TicketSetupView(ctx.author.id))
+
+@ticket_prefix.command(name="close")
+async def tp_close(ctx):
+    if not ctx.channel.name.startswith("ticket-"):
+        return await ctx.send(embed=err_embed("This is not a ticket channel."))
+    is_admin = ctx.author.guild_permissions.administrator
+    has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in ctx.author.roles)
+    if not is_admin and not has_support:
+        return await ctx.send(embed=err_embed("<a:disabled1:1483344744024248453> Only **Admins** or **Staff** can close tickets."), delete_after=5)
+    await ctx.send(embed=discord.Embed(description="🔒 Closing in 5 seconds...", color=C_ERROR))
+    ch = ctx.channel
+    closer = ctx.author
+    guild = ctx.guild
+    topic = ch.topic or ""
+    creator = None
+    import re, io
+    id_match = re.search(r"\((\d+)\)", topic)
+    if id_match:
+        creator = guild.get_member(int(id_match.group(1)))
+
+    transcript_lines = [f"=== Ticket Transcript: {ch.name} ===\n"]
+    async for msg in ch.history(limit=500, oldest_first=True):
+        if msg.author.bot and not msg.embeds: continue
+        ts = msg.created_at.strftime("%d/%m/%Y %H:%M")
+        if msg.content:
+            transcript_lines.append(f"[{ts}] {msg.author}: {msg.content}")
+    transcript_bytes = "\n".join(transcript_lines).encode("utf-8")
+
+    _tlog2 = _get_guild_log(guild.id, "ticket_log")
+    if _tlog2:
+        lch = guild.get_channel(_tlog2)
+        if lch:
+            le = discord.Embed(title="Ticket Closed", color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+            le.description = f"{closer.mention} closed a ticket."
+            le.add_field(name="Close Information",
+                value=f"\u2502 **Ticket Name:** {ch.name}\n\u2502 **Ticket ID:** {ch.id}\n\u2502 **Reason:** No further action required.",
+                inline=False)
+            if creator:
+                le.add_field(name="Creator Information",
+                    value=f"\u2502 **Creator:** {creator.mention}\n\u2502 **Username:** @{creator.name}\n\u2502 **ID:** {creator.id}",
+                    inline=False)
+            le.add_field(name="Executor Information",
+                value=f"\u2502 **Executor:** {closer.mention}\n\u2502 **Username:** @{closer.name}\n\u2502 **ID:** {closer.id}",
+                inline=False)
+            le.set_footer(text="Made by Black Belt")
+            await lch.send(embed=le, file=discord.File(fp=io.BytesIO(transcript_bytes), filename=f"transcript-{ch.name}.txt"))
+
+    await asyncio.sleep(5)
+    await ctx.channel.delete()
+
+@ticket_prefix.command(name="add")
+async def tp_add(ctx, member: discord.Member):
+    is_admin = ctx.author.guild_permissions.administrator
+    has_support = SUPPORT_ROLE_ID and any(r.id == SUPPORT_ROLE_ID for r in ctx.author.roles)
+    is_owner = ctx.channel.topic and str(ctx.author.id) in ctx.channel.topic
+    if not is_admin and not has_support and not is_owner:
+        return await ctx.send(embed=err_embed("Only the ticket owner or staff can add users."), delete_after=5)
+    await ctx.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+    await ctx.send(embed=ok_embed(f"Added {member.mention} to the ticket."))
+
+@ticket_prefix.command(name="remove")
+async def tp_remove(ctx, member: discord.Member):
+    await ctx.channel.set_permissions(member, view_channel=False)
+    await ctx.send(embed=ok_embed(f"Removed {member.mention} from the ticket."))
+
+@ticket_prefix.command(name="rename")
+async def tp_rename(ctx, *, name: str):
+    clean = re.sub(r"\s+", "-", name.lower())
+    await ctx.channel.edit(name=clean)
+    await ctx.send(embed=ok_embed(f"Renamed to `{clean}`."))
+
+@ticket_prefix.command(name="claim")
+async def tp_claim(ctx):
+    await ctx.channel.edit(topic=f"Claimed by {ctx.author}")
+    await ctx.send(embed=discord.Embed(description=f"<a:Tick:1483344124357644350> Claimed by {ctx.author.mention}.", color=C_SUCCESS))
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TICKET CATEGORY MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@ticket_prefix.command(name="setclosedm", aliases=["closedm", "dmclose"])
+@commands.has_permissions(administrator=True)
+async def tp_setclosedm(ctx, *, message: str = None):
+    """Set DM message sent when ticket closes.
+    Use {ticket_name} and {closer} as placeholders.
+    Leave empty to disable DM."""
+    # close_dm handled per-guild
+    if not message:
+        _set_ticket_close_dm(ctx.guild.id, "")
+        return await ctx.send(embed=ok_embed("Close DM disabled. No DM will be sent on ticket close."))
+    _set_ticket_close_dm(ctx.guild.id, message)
+    preview = message.replace("{ticket_name}", "ticket-example").replace("{closer}", ctx.author.display_name)
+    e = discord.Embed(color=C_SUCCESS)
+    e.description = f"<a:Tick:1483344124357644350> Close DM message set!\n\n**Preview:**\n{preview}"
+    e.set_footer(text="Use {ticket_name} and {closer} as placeholders • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+@ticket_prefix.command(name="setping")
+@commands.has_permissions(administrator=True)
+async def tp_setping(ctx, *, role_input: str = None):
+    # ping_role handled per-guild
+    if not role_input:
+        _set_ticket_ping(ctx.guild.id, 0)
+        return await ctx.send(embed=ok_embed("Ping role removed."))
+    # Find by mention, ID or name
+    import re
+    role = None
+    mention_match = re.match(r"<@&(\d+)>", role_input.strip())
+    if mention_match:
+        role = ctx.guild.get_role(int(mention_match.group(1)))
+    if not role and role_input.strip().isdigit():
+        role = ctx.guild.get_role(int(role_input.strip()))
+    if not role:
+        role = discord.utils.find(lambda r: r.name.lower() == role_input.strip().lstrip("@").lower(), ctx.guild.roles)
+    if not role:
+        return await ctx.send(embed=err_embed(f"Role `{role_input}` not found."))
+    _TICKET_PING_ROLE[ctx.guild.id] = role.id
+    DB.save_ticket_config(ctx.guild.id, ping_role=role.id)
+    await ctx.send(embed=ok_embed(f"Ping role set to {role.mention}"))
+
+
+@ticket_prefix.command(name="setcategory", aliases=["setcat", "sc"])
+@commands.has_permissions(administrator=True)
+async def tp_setcategory(ctx, ticket_type: str, category: discord.CategoryChannel = None, *, raw_id: str = None):
+    """Set Discord category for a ticket type.
+    Usage: $ticket setcategory buy #PURCHASE-TICKET
+           $ticket setcategory buy 1234567890123456789
+           $ticket setcategory buy (removes mapping)
+    """
+    key = ticket_type.lower().replace(" ", "_")
+    # ── FIX: use per-guild categories (includes custom ones added with $ticket addcat) ──
+    _guild_cats = get_ticket_categories(ctx.guild.id)
+    if key == "all":
+        # Special key: set one category for ALL ticket types at once
+        emoji, label = "🗂️", "All Ticket Types"
+    elif key not in _guild_cats:
+        cats = ", ".join(f"`{k}`" for k in _guild_cats)
+        return await ctx.send(embed=err_embed(f"Ticket type `{ticket_type}` not found.\n\nAvailable types: {cats}\n\n💡 Tip: Use `all` to set one category for all types."))
+    else:
+        emoji, label, _ = _guild_cats[key]
+
+    # If no category mention was resolved, try raw_id or check if ticket_type itself is an ID
+    if category is None:
+        # Try to parse raw_id or fallback — sometimes discord.py fails to resolve CategoryChannel from raw ID
+        raw_str = raw_id
+        if raw_str is None:
+            # Maybe the user passed raw ID as the category arg but discord.py couldn't convert it
+            # Check the original message args
+            args = ctx.message.content.split()
+            # args[0] = "$ticket", args[1] = "setcategory", args[2] = ticket_type, args[3] = category
+            if len(args) >= 4:
+                raw_str = args[3]  # fourth token: the actual category ID
+
+        if raw_str:
+            raw_str = raw_str.strip().lstrip("<#").rstrip(">")
+            try:
+                cat_id = int(raw_str)
+                resolved = ctx.guild.get_channel(cat_id)
+                if resolved is None:
+                    try:
+                        resolved = await ctx.guild.fetch_channel(cat_id)
+                    except Exception:
+                        resolved = None
+                if resolved and isinstance(resolved, discord.CategoryChannel):
+                    category = resolved
+                elif resolved is None and cat_id:
+                    # Save ID even if bot can't fetch it (might be a permissions issue)
+                    _set_ticket_category(ctx.guild.id, key, cat_id)
+                    return await ctx.send(embed=discord.Embed(
+                        color=C_SUCCESS,
+                        description=f"<a:Tick:1483344124357644350> **{emoji} {label}** tickets will now go to category ID `{cat_id}`\n⚠️ Could not verify category — make sure bot has access to it."
+                    ))
+            except ValueError:
+                pass
+
+    if not category:
+        if key == "all":
+            # Remove all category mappings
+            for k in list(get_ticket_categories(ctx.guild.id).keys()):
+                _remove_ticket_category(ctx.guild.id, k)
+            return await ctx.send(embed=ok_embed("Removed all category mappings.\nNew tickets will use the default category."))
+        _remove_ticket_category(ctx.guild.id, key)
+        return await ctx.send(embed=ok_embed(f"Removed category mapping for **{emoji} {label}**.\nNew tickets will use the default category."))
+
+    if key == "all":
+        # Set ALL ticket types to this category
+        _gcats = get_ticket_categories(ctx.guild.id)
+        for k in _gcats.keys():
+            _set_ticket_category(ctx.guild.id, k, category.id)
+        return await ctx.send(embed=discord.Embed(
+            color=C_SUCCESS,
+            description=f"<a:Tick:1483344124357644350> **All ticket types** will now go to **{category.name}**"
+        ))
+
+    _set_ticket_category(ctx.guild.id, key, category.id)
+    await ctx.send(embed=discord.Embed(
+        color=C_SUCCESS,
+        description=f"<a:Tick:1483344124357644350> **{emoji} {label}** tickets will now go to **{category.name}**"
+    ))
+
+
+@ticket_prefix.command(name="showcategories", aliases=["showcat", "catmap"])
+async def tp_showcategories(ctx):
+    """Show all ticket type → Discord category mappings."""
+    lines = []
+    for key, (emoji, label, _) in get_ticket_categories(ctx.guild.id).items():
+        cat_id = _get_ticket_cfg(ctx.guild.id)["category_map"].get(key) or get_ticket_cat_map(ctx.guild.id).get(key)
+        if cat_id:
+            cat = ctx.guild.get_channel(cat_id)
+            cat_name = f"**{cat.name}**" if cat else f"~~Deleted~~ ({cat_id})"
+        else:
+            default_cat = ctx.guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+            cat_name = f"{default_cat.name} *(default)*" if default_cat else "*No category set*"
+        lines.append(f"{emoji} **{label}** → {cat_name}")
+
+    e = discord.Embed(
+        title="🗂️ Ticket Category Mapping",
+        description="\n".join(lines),
+        color=C_TICKET
+    )
+    e.set_footer(text="Use $ticket setcategory <type> #channel to change • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+@ticket_prefix.command(name="addcat")
+@commands.has_permissions(administrator=True)
+async def tp_addcat(ctx, emoji: str, *, label: str):
+    """Add a ticket category. Usage: $ticket addcat 🎮 Gaming Support"""
+    if len(TICKET_CATEGORIES) >= 25:
+        return await ctx.send(embed=err_embed("Max 25 categories allowed by Discord."))
+    key = label.lower().replace(" ", "_")[:20]
+    if key in TICKET_CATEGORIES:
+        return await ctx.send(embed=err_embed(f"Category `{label}` already exists."))
+    get_ticket_categories(ctx.guild.id)[key] = (emoji, label, "Click on this option to create a ticket")
+    save_ticket_categories(ctx.guild.id)
+    e = discord.Embed(
+        color=C_SUCCESS,
+        description=f"<a:Tick:1483344124357644350> Added category **{emoji} {label}**\nResend the ticket panel with `$ticket panel` to apply."
+    )
+    await ctx.send(embed=e)
+
+@ticket_prefix.command(name="removecat", aliases=["delcat", "rmcat"])
+@commands.has_permissions(administrator=True)
+async def tp_removecat(ctx, *, label: str):
+    """Remove a ticket category by label. Usage: $ticket removecat Gaming Support"""
+    found_key = None
+    _gcats = get_ticket_categories(ctx.guild.id)
+    for key, (emoji, lbl, desc) in list(_gcats.items()):
+        if lbl.lower() == label.lower() or key.lower() == label.lower():
+            found_key = key
+            break
+    if not found_key:
+        cats = ", ".join(f"`{lbl}`" for _, (_, lbl, _) in get_ticket_categories(ctx.guild.id).items())
+        return await ctx.send(embed=err_embed(f"Category not found.\n\nAvailable: {cats}"))
+    emoji, lbl, _ = get_ticket_categories(ctx.guild.id).pop(found_key)
+    save_ticket_categories(ctx.guild.id)
+    e = discord.Embed(
+        color=C_SUCCESS,
+        description=f"<a:Tick:1483344124357644350> Removed category **{emoji} {lbl}**\nResend the ticket panel with `$ticket panel` to apply."
+    )
+    await ctx.send(embed=e)
+
+@ticket_prefix.command(name="listcats", aliases=["cats", "categories"])
+async def tp_listcats(ctx):
+    """List all ticket categories."""
+    if not TICKET_CATEGORIES:
+        return await ctx.send(embed=err_embed("No categories set."))
+    lines = [f"{emoji} **{label}**" for _, (emoji, label, _) in get_ticket_categories(ctx.guild.id).items()]
+    e = discord.Embed(
+        title="<a:Announcement:1483344095228461056> Ticket Categories",
+        description="\n".join(lines),
+        color=C_TICKET
+    )
+    e.set_footer(text=f"{len(TICKET_CATEGORIES)} categories • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@ticket_prefix.command(name="editcat")
+@commands.has_permissions(administrator=True)
+async def tp_editcat(ctx, emoji: str, old_label: str, *, new_label: str):
+    """Edit a category. Usage: $ticket editcat 🎮 OldName New Name"""
+    found_key = None
+    for key, (em, lbl, desc) in get_ticket_categories(ctx.guild.id).items():
+        if lbl.lower() == old_label.lower() or key.lower() == old_label.lower():
+            found_key = key
+            break
+    if not found_key:
+        return await ctx.send(embed=err_embed(f"Category `{old_label}` not found."))
+    TICKET_CATEGORIES[found_key] = (emoji, new_label, "Click on this option to create a ticket")
+    e = discord.Embed(
+        color=C_SUCCESS,
+        description=f"<a:Tick:1483344124357644350> Updated to **{emoji} {new_label}**\nResend with `$ticket panel` to apply."
+    )
+    await ctx.send(embed=e)
+
+
+
+
+# ── $ticket blacklist / unblacklist / blacklistinfo / security ────────────────
+
+@ticket_prefix.command(name="blacklist", aliases=["bl"])
+@commands.has_permissions(administrator=True)
+async def tp_blacklist(ctx, member: discord.Member = None, *, reason: str = "No reason provided"):
+    """Blacklist a user from opening tickets. Usage: $ticket blacklist @user [reason]"""
+    if not member:
+        return await ctx.send(embed=err_embed("Please mention a user.\nUsage: `$ticket blacklist @user [reason]`"))
+    if member.guild_permissions.administrator:
+        return await ctx.send(embed=err_embed("You cannot blacklist an administrator."))
+    DB.add_ticket_blacklist(ctx.guild.id, member.id, reason=reason, mod_id=ctx.author.id)
+    e = discord.Embed(
+        title="🚫 Ticket Blacklisted",
+        description=(
+            f"**{member.mention}** has been blacklisted from opening tickets.\n\n"
+            f"**Reason:** {reason}\n"
+            f"**Moderator:** {ctx.author.mention}\n\n"
+            f"Use `$ticket unblacklist @{member.name}` to remove."
+        ),
+        color=0xff4444,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text="Empire Ticket Security • Made by Black Belt")
+    await ctx.send(embed=e)
+    # Try to DM the user
+    try:
+        dm_e = discord.Embed(
+            title="🚫 You have been ticket blacklisted",
+            description=f"You can no longer open tickets in **{ctx.guild.name}**.\n**Reason:** {reason}",
+            color=0xff4444
+        )
+        await member.send(embed=dm_e)
+    except:
+        pass
+
+@ticket_prefix.command(name="unblacklist", aliases=["ubl", "unbl"])
+@commands.has_permissions(administrator=True)
+async def tp_unblacklist(ctx, member: discord.Member = None):
+    """Remove a user from the ticket blacklist. Usage: $ticket unblacklist @user"""
+    if not member:
+        return await ctx.send(embed=err_embed("Please mention a user.\nUsage: `$ticket unblacklist @user`"))
+    removed = DB.remove_ticket_blacklist(ctx.guild.id, member.id)
+    if removed:
+        e = discord.Embed(
+            title="✅ Blacklist Removed",
+            description=f"{member.mention} can now open tickets again.",
+            color=0x57f287
+        )
+    else:
+        e = discord.Embed(
+            title="⚠️ Not Blacklisted",
+            description=f"{member.mention} was not in the ticket blacklist.",
+            color=0xffa500
+        )
+    await ctx.send(embed=e)
+
+@ticket_prefix.command(name="blacklistinfo", aliases=["blinfo", "bls", "blacklists"])
+@commands.has_permissions(manage_guild=True)
+async def tp_blacklistinfo(ctx, member: discord.Member = None):
+    """View ticket blacklist info. Usage: $ticket blacklistinfo [@user]"""
+    if member:
+        bl = DB.is_ticket_blacklisted(ctx.guild.id, member.id)
+        if not bl:
+            return await ctx.send(embed=ok_embed(f"{member.mention} is **not** blacklisted."))
+        e = discord.Embed(title="🚫 Blacklist Entry", color=0xff4444)
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="User", value=member.mention, inline=True)
+        e.add_field(name="Since", value=bl.get("timestamp", "?"), inline=True)
+        mod = ctx.guild.get_member(bl.get("mod_id", 0))
+        e.add_field(name="Blacklisted by", value=mod.mention if mod else "Unknown", inline=True)
+        e.add_field(name="Reason", value=bl.get("reason") or "No reason", inline=False)
+        return await ctx.send(embed=e)
+    # Full list
+    blist = DB.get_ticket_blacklist(ctx.guild.id)
+    if not blist:
+        return await ctx.send(embed=ok_embed("No users are currently blacklisted."))
+    lines = []
+    for bl in blist[:20]:
+        u = ctx.guild.get_member(bl["user_id"])
+        name = u.mention if u else f"`{bl['user_id']}`"
+        lines.append(f"• {name} — {bl.get('reason') or 'No reason'} *(since {bl.get('timestamp','?')})*")
+    e = discord.Embed(
+        title=f"🚫 Ticket Blacklist ({len(blist)} entries)",
+        description="\n".join(lines),
+        color=0xff4444
+    )
+    e.set_footer(text="$ticket blacklist @user | $ticket unblacklist @user")
+    await ctx.send(embed=e)
+
+@ticket_prefix.command(name="security", aliases=["sec"])
+@commands.has_permissions(administrator=True)
+async def tp_security(ctx, setting: str = None, value: str = None):
+    """Configure ticket security settings.
+    Usage:
+      $ticket security                  — show current settings
+      $ticket security minage <days>    — min account age to open ticket (0=disabled)
+      $ticket security cooldown <secs>  — cooldown between tickets
+    """
+    global TICKET_COOLDOWN_S
+    if setting is None:
+        cfg = DB.get_ticket_config(ctx.guild.id)
+        min_age = int(cfg.get("min_account_age") or 0)
+        e = discord.Embed(title="🔒 Ticket Security Settings", color=0x5865f2)
+        e.add_field(
+            name="Minimum Account Age",
+            value=f"`{min_age} days`" + (" *(disabled)*" if min_age == 0 else ""),
+            inline=True
+        )
+        e.add_field(
+            name="Ticket Cooldown",
+            value=f"`{TICKET_COOLDOWN_S}s` ({TICKET_COOLDOWN_S//60}m)",
+            inline=True
+        )
+        bl_count = len(DB.get_ticket_blacklist(ctx.guild.id))
+        e.add_field(name="Blacklisted Users", value=f"`{bl_count}` users", inline=True)
+        e.set_footer(text="$ticket security minage <days> | $ticket security cooldown <secs>")
+        return await ctx.send(embed=e)
+
+    setting = setting.lower()
+    if setting in ("minage", "min_age", "age"):
+        try:
+            days = int(value)
+            if days < 0 or days > 3650:
+                raise ValueError
+        except (TypeError, ValueError):
+            return await ctx.send(embed=err_embed("Invalid value. Use a number of days (0 to disable)."))
+        DB.save_ticket_config(ctx.guild.id, min_account_age=days)
+        if days == 0:
+            return await ctx.send(embed=ok_embed("Minimum account age **disabled**."))
+        return await ctx.send(embed=ok_embed(f"Minimum account age set to **{days} days**.\nAccounts newer than this cannot open tickets."))
+
+    elif setting in ("cooldown", "cd"):
+        try:
+            secs = int(value)
+            if secs < 0 or secs > 86400:
+                raise ValueError
+        except (TypeError, ValueError):
+            return await ctx.send(embed=err_embed("Invalid value. Use seconds (0–86400)."))
+        TICKET_COOLDOWN_S = secs
+        return await ctx.send(embed=ok_embed(f"Ticket cooldown set to **{secs}s** ({secs//60}m {secs%60}s)."))
+    else:
+        return await ctx.send(embed=err_embed(f"Unknown setting `{setting}`.\nUse: `minage`, `cooldown`"))
+
+
+# ── !afk ───────────────────────────────────────────────────────────────────────
+@bot.command(name="afk")
+async def afk_prefix(ctx, *, reason: str = "AFK"):
+    afk_map[ctx.author.id] = {"reason": reason, "time": datetime.now(timezone.utc)}
+    try:
+        nick = ctx.author.nick or ctx.author.name
+        if not nick.startswith("[AFK] "):
+            await ctx.author.edit(nick=f"[AFK] {nick[:24]}")
+    except: pass
+    e = discord.Embed(title="💤 AFK Set", description=f"You are now AFK.\n**Reason:** {reason}", color=C_AFK)
+    e.set_footer(text="You'll be unset when you send a message. • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+# ── !timeout / !untimeout ──────────────────────────────────────────────────────
+@bot.command(name="timeout")
+@commands.has_permissions(moderate_members=True)
+async def timeout_prefix(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    td = parse_duration(duration)
+    if not td:
+        return await ctx.send(embed=err_embed("Invalid duration. Use e.g. `10m`, `1h`, `2d`."))
+    if td > timedelta(days=28):
+        return await ctx.send(embed=err_embed("Max timeout is 28 days."))
+    await member.timeout(datetime.now(timezone.utc) + td, reason=reason)
+    e = discord.Embed(title="<a:clock:1483340836467900507> Member Timed Out", color=C_WARN, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="Member",    value=f"{member.mention}", inline=True)
+    e.add_field(name="Duration",  value=fmt_delta(td),       inline=True)
+    e.add_field(name="Reason",    value=reason,              inline=False)
+    await ctx.send(embed=e)
+    await send_mod_log(ctx.guild, "Timeout", member, member.id, ctx.author, reason, C_WARN)
+
+@bot.command(name="untimeout")
+@commands.has_permissions(moderate_members=True)
+async def untimeout_prefix(ctx, member: discord.Member):
+    await member.timeout(None)
+    await ctx.send(embed=ok_embed(f"Removed timeout from {member.mention}."))
+    await send_mod_log(ctx.guild, "Un-Timeout", member, member.id, ctx.author, "Manual", C_SUCCESS)
+
+
+# ── !kick / !ban / !unban ──────────────────────────────────────────────────────
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def kick_prefix(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.kick(reason=reason)
+    await ctx.send(embed=ok_embed(f"👢 Kicked **{member}** | {reason}"))
+    await send_mod_log(ctx.guild, "Kick", member, member.id, ctx.author, reason, C_ERROR)
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def ban_prefix(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    await member.ban(reason=reason)
+    await ctx.send(embed=ok_embed(f"<a:ARedArrow:1483344139452940338> Banned **{member}** | {reason}"))
+    await send_mod_log(ctx.guild, "Ban", member, member.id, ctx.author, reason, C_ERROR)
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def unban_prefix(ctx, user_id: str):
+    try:
+        await ctx.guild.unban(discord.Object(int(user_id)))
+        await ctx.send(embed=ok_embed(f"Unbanned `{user_id}`."))
+        await send_mod_log(ctx.guild, "Unban", user_id, user_id, ctx.author, "Manual", C_SUCCESS)
+    except Exception as ex:
+        await ctx.send(embed=err_embed(str(ex)))
+
+
+# ── !warn / !warnings / !clearwarns ───────────────────────────────────────────
+@bot.command(name="warn")
+@commands.has_permissions(moderate_members=True)
+async def warn_prefix(ctx, member: discord.Member, *, reason: str):
+    key = (ctx.guild.id, member.id)
+    warn_map[key].append({"reason": reason, "mod": str(ctx.author), "time": datetime.now(timezone.utc)})
+    DB.warn_add(key[0], key[1], reason, ctx.author.id)
+    count = len(warn_map[key])
+    e = discord.Embed(title="⚠️ Warning Issued", color=C_WARN, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="User",   value=member.mention, inline=True)
+    e.add_field(name="Warn #", value=str(count),     inline=True)
+    e.add_field(name="Reason", value=reason,         inline=False)
+    try: await member.send(embed=e)
+    except: pass
+    await ctx.send(embed=e)
+    await send_mod_log(ctx.guild, "Warn", member, member.id, ctx.author, reason, C_WARN)
+
+@bot.command(name="warnings")
+@commands.has_permissions(moderate_members=True)
+async def warnings_prefix(ctx, member: discord.Member):
+    key   = (ctx.guild.id, member.id)
+    warns = warn_map.get(key, [])
+    if not warns:
+        return await ctx.send(embed=ok_embed(f"{member} has no warnings."))
+    lines = "\n\n".join(
+        f"**#{i+1}** — {w['reason']}\n> by {w['mod']} • <t:{int(w['time'].timestamp())}:R>"
+        for i, w in enumerate(warns))
+    e = discord.Embed(title=f"⚠️ Warnings for {member}", description=lines, color=C_WARN)
+    e.set_footer(text=f"Total: {len(warns)} • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@bot.command(name="clearwarns")
+@commands.has_permissions(administrator=True)
+async def clearwarns_prefix(ctx, member: discord.Member):
+    warn_map.pop((ctx.guild.id, member.id), None)
+    await ctx.send(embed=ok_embed(f"Cleared all warnings for {member.mention}."))
+
+
+# ── !purge ────────────────────────────────────────────────────────────────────
+@bot.command(name="purge", aliases=["clear", "prune"])
+@commands.has_permissions(manage_messages=True)
+async def purge_prefix(ctx, amount: int = 10, member: discord.Member = None):
+    await ctx.message.delete()
+    amount = max(1, min(amount, 100))
+    def check(m):
+        if member:
+            return m.author == member
+        return True
+    try:
+        deleted = await ctx.channel.purge(limit=amount, check=check, bulk=True)
+        msg = await ctx.send(embed=ok_embed(f"Deleted **{len(deleted)}** message(s)."))
+        await asyncio.sleep(4)
+        await msg.delete()
+    except Exception as ex:
+        await ctx.send(embed=err_embed(f"Purge failed: {ex}"), delete_after=5)
+
+
+# ── !lock / !unlock ───────────────────────────────────────────────────────────
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def lock_prefix(ctx, channel: discord.TextChannel = None):
+    ch = channel or ctx.channel
+    await ch.set_permissions(ctx.guild.default_role, send_messages=False)
+    e = discord.Embed(description=f"🔒 {ch.mention} has been **locked**.", color=C_ERROR)
+    await ctx.send(embed=e)
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def unlock_prefix(ctx, channel: discord.TextChannel = None):
+    ch = channel or ctx.channel
+    await ch.set_permissions(ctx.guild.default_role, send_messages=None)
+    e = discord.Embed(description=f"🔓 {ch.mention} has been **unlocked**.", color=C_SUCCESS)
+    await ctx.send(embed=e)
+
+
+# ── !slowmode ─────────────────────────────────────────────────────────────────
+@bot.command(name="slowmode")
+@commands.has_permissions(manage_channels=True)
+async def slowmode_prefix(ctx, seconds: int, channel: discord.TextChannel = None):
+    ch = channel or ctx.channel
+    await ch.edit(slowmode_delay=max(0, min(seconds, 21600)))
+    msg = f"Slowmode disabled in {ch.mention}." if seconds == 0 else f"Slowmode set to **{seconds}s** in {ch.mention}."
+    await ctx.send(embed=ok_embed(msg))
+
+
+# ── !note ─────────────────────────────────────────────────────────────────────
+@bot.command(name="note")
+@commands.has_permissions(moderate_members=True)
+async def note_prefix(ctx, member: discord.Member, *, text: str = None):
+    key = (ctx.guild.id, member.id)
+    if not text:
+        notes = note_map.get(key, [])
+        if not notes:
+            return await ctx.send(embed=ok_embed(f"No notes for {member}."))
+        lines = "\n\n".join(
+            f"**#{i+1}** — {n['text']}\n> by {n['mod']} • <t:{int(n['time'].timestamp())}:R>"
+            for i, n in enumerate(notes))
+        return await ctx.send(embed=discord.Embed(title=f"📝 Notes for {member}", description=lines, color=C_INFO))
+    note_map[key].append({"text": text, "mod": str(ctx.author), "time": datetime.now(timezone.utc)})
+    DB.note_add(key[0], key[1], text, ctx.author.id)
+    await ctx.send(embed=ok_embed(f"Note added for {member.mention}."))
+
+
+# ── !invites / !inviteboard / !resetinvites ───────────────────────────────────
+@bot.command(name="invites", aliases=["i", "inv", "invite"])
+async def invites_prefix(ctx, member: discord.Member = None):
+    target   = member or ctx.author
+    data     = invite_tracker[ctx.guild.id][target.id]
+    total    = data["invites"]
+    joins    = data["invites"] + data["rejoins"]
+    left     = data["left"]
+    fake     = data["fake"]
+    rejoins  = data["rejoins"]
+    time_str = datetime.now().strftime("%H:%M")
+
+    inv_word = "invites" if total != 1 else "invite"
+    e = discord.Embed(color=0x3498db)
+    e.set_author(name="Invite log")
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.description = (
+        f"\u25b6\u25b6 **{target.display_name} has {total} {inv_word}**\n\n"
+        f"**Joins :** {joins}\n"
+        f"**Left :** {left}\n"
+        f"**Fake :** {fake}\n"
+        f"**Rejoins :** {rejoins}"
+    )
+    e.set_footer(text=f"Requested by {ctx.author.display_name} \u2022 Today at {time_str} • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@bot.command(name="inviteboard", aliases=["ilb", "invlb"])
+async def inviteboard_prefix(ctx):
+    gdata = invite_tracker.get(ctx.guild.id, {})
+    sorted_data = sorted(gdata.items(), key=lambda x: x[1]["invites"], reverse=True)
+    if not sorted_data:
+        return await ctx.send(embed=err_embed("No invite data yet."))
+
+    PER_PAGE = 10
+    total_pages = max(1, (len(sorted_data) + PER_PAGE - 1) // PER_PAGE)
+
+    def make_embed(page: int) -> discord.Embed:
+        start = page * PER_PAGE
+        chunk = sorted_data[start:start + PER_PAGE]
+        lines = []
+        for idx, (uid, d) in enumerate(chunk):
+            rank    = start + idx + 1
+            total   = d["invites"]
+            joins   = d["invites"] + d["rejoins"]
+            left    = d["left"]
+            fake    = d["fake"]
+            rejoins = d["rejoins"]
+            lines.append(
+                f"**#{rank}** <@{uid}> • **{total} Invite{'s' if total != 1 else ''}** "
+                f"(**{joins}** Joins, **{left}** Leaves, **{fake}** Fakes, **{rejoins}** Rejoins)"
+            )
+        e = discord.Embed(color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+        e.set_author(name="Invite Leaderboard")
+        e.description = "\n".join(lines)
+        e.set_footer(text=f"Page {page+1}/{total_pages} | {len(sorted_data)} members tracked • Made by Black Belt")
+        return e
+
+    class LeaderboardView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.page = 0
+            self.update_buttons()
+
+        def update_buttons(self):
+            self.first_btn.disabled  = self.page == 0
+            self.prev_btn.disabled   = self.page == 0
+            self.next_btn.disabled   = self.page >= total_pages - 1
+            self.last_btn.disabled   = self.page >= total_pages - 1
+
+        @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, custom_id="lb_first")
+        async def first_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = 0
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary, custom_id="lb_prev")
+        async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = max(0, self.page - 1)
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.primary, custom_id="lb_stop")
+        async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            self.stop()
+
+        @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary, custom_id="lb_next")
+        async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = min(total_pages - 1, self.page + 1)
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="lb_last")
+        async def last_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = total_pages - 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+    view = LeaderboardView()
+    await ctx.send(embed=make_embed(0), view=view)
+
+@bot.command(name="resetinvites")
+@commands.has_permissions(administrator=True)
+async def resetinvites_prefix(ctx, member: discord.Member):
+    invite_tracker[ctx.guild.id].pop(member.id, None)
+    await ctx.send(embed=ok_embed(f"Reset invite count for {member.mention}."))
+
+
+# ── !userinfo / !serverinfo / !avatar / !ping / !botinfo ─────────────────────
+@bot.command(name="userinfo")
+async def userinfo_prefix(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    roles  = [r.mention for r in target.roles if r != ctx.guild.default_role]
+    e = discord.Embed(title=f"👤 {target}", color=C_PRIMARY, timestamp=datetime.now(timezone.utc))
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.add_field(name="ID",              value=str(target.id), inline=True)
+    e.add_field(name="Bot",             value="Yes" if target.bot else "No", inline=True)
+    e.add_field(name="Account Created", value=f"<t:{int(target.created_at.timestamp())}:R>", inline=True)
+    e.add_field(name="Joined Server",   value=f"<t:{int(target.joined_at.timestamp())}:R>" if target.joined_at else "N/A", inline=True)
+    e.add_field(name="Roles",           value=" ".join(roles) if roles else "None", inline=False)
+    await ctx.send(embed=e)
+
+@bot.command(name="serverinfo", aliases=["si", "server"])
+async def serverinfo_prefix(ctx):
+    g = ctx.guild
+    # Count channels
+    text_ch  = len([c for c in g.channels if isinstance(c, discord.TextChannel)])
+    voice_ch = len([c for c in g.channels if isinstance(c, discord.VoiceChannel)])
+    cats     = len([c for c in g.channels if isinstance(c, discord.CategoryChannel)])
+    # Verification level
+    vl = str(g.verification_level).replace("_", " ").title()
+    # AFK timeout
+    afk_timeout = f"{g.afk_timeout} sec" if g.afk_timeout else "None"
+
+    e = discord.Embed(
+        title="🖥️ Server Information",
+        description=f"> {g.description or g.name}",
+        color=C_PRIMARY,
+        timestamp=datetime.now(timezone.utc)
+    )
+    if g.icon:
+        e.set_thumbnail(url=g.icon.url)
+
+    e.add_field(name="📋 General Info", inline=False, value=(
+        f"**Name:** {g.name}\n"
+        f"**Server ID:** {g.id}\n"
+        f"**Owner:** <@{g.owner_id}>\n"
+        f"**Created:** <t:{int(g.created_at.timestamp())}:R> • {g.created_at.strftime('%d %B %Y %H:%M')}"
+    ))
+    e.add_field(name="👥 Members & Roles", inline=True, value=(
+        f"**Members:** {g.member_count:,}\n"
+        f"**Roles:** {len(g.roles)}\n"
+        f"**Verification Level:** {vl}\n"
+        f"**AFK Timeout:** {afk_timeout}"
+    ))
+    e.add_field(name="💎 Boost Status", inline=True, value=(
+        f"**Level:** {g.premium_tier}\n"
+        f"**Boosts:** {g.premium_subscription_count}"
+    ))
+    e.add_field(name="📁 Channels", inline=False, value=(
+        f"**Text:** {text_ch}\n"
+        f"**Voice:** {voice_ch}\n"
+        f"**Categories:** {cats}"
+    ))
+    e.set_footer(text=f"Requested by {ctx.author} • Today at {datetime.now().strftime('%H:%M')}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=e)
+
+@bot.command(name="avatar")
+async def avatar_prefix(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    e = discord.Embed(title=f"🖼️ {target.display_name}'s Avatar", color=C_PRIMARY)
+    e.set_image(url=target.display_avatar.replace(size=1024).url)
+    await ctx.send(embed=e)
+
+@bot.command(name="ping")
+async def ping_prefix(ctx):
+    latency = round(bot.latency * 1000)
+    e = discord.Embed(title="🏓 Pong!", color=C_INFO)
+    e.add_field(name="Bot Latency", value=f"{latency}ms", inline=True)
+    await ctx.send(embed=e)
+
+@bot.command(name="botinfo")
+async def botinfo_prefix(ctx):
+    e = discord.Embed(
+        title=f"🤖 {BOT_NAME} Bot",
+        description="Full-featured Discord bot — Tickets, Mod, AFK, Invites & more.",
+        color=C_PRIMARY, timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=bot.user.display_avatar.url)
+    e.add_field(name="<a:Moderation:1483344127071486123> Features", value=(
+        "<a:Announcement:1483344095228461056> Tickets · <a:clock:1483340836467900507> Timeout · 💤 AFK\n"
+        "<a:Announcement:1483344095228461056> Invite Tracking · ⚠️ Warns\n"
+        "🔒 Lock/Unlock · 🗑️ Purge · 🔇 Slowmode\n"
+        "📝 Notes · 📊 Userinfo/Serverinfo"
+    ), inline=False)
+    e.add_field(name="Servers", value=str(len(bot.guilds)), inline=True)
+    e.add_field(name="Prefix",  value="!",                  inline=True)
+    await ctx.send(embed=e)
+
+
+# ── Prefix error handler ──────────────────────────────────────────────────────
+# ── $setfakedays ─────────────────────────────────────────────────────────────
+@bot.command(name="setfakedays", aliases=["fakedays"])
+@commands.has_permissions(administrator=True)
+async def setfakedays_cmd(ctx, days: int):
+    global FAKE_DAYS
+    if days < 0 or days > 365:
+        return await ctx.send(embed=err_embed("Days must be between 0 and 365."))
+    FAKE_DAYS = days
+    e = discord.Embed(
+        color=C_SUCCESS,
+        description=(
+            f"<a:Tick:1483344124357644350> Fake detection updated!\n\n"
+            f"Accounts newer than **{days} days** will be counted as **Fake**.\n"
+            f"Use `$setfakedays 0` to disable fake detection."
+        )
+    )
+    await ctx.send(embed=e)
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(embed=err_embed("You don't have permission for this command."), delete_after=5)
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send(embed=err_embed(f"I am missing permissions: `{error.missing_permissions}`"), delete_after=5)
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send(embed=err_embed("Member not found. Try mentioning them or use their ID."), delete_after=5)
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(embed=err_embed(f"Invalid argument. Check `$help` for usage."), delete_after=5)
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(embed=err_embed(f"Missing: `{error.param.name}` — check `$help` for usage."), delete_after=5)
+    elif isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(embed=err_embed(f"Cooldown! Try again in `{error.retry_after:.1f}s`."), delete_after=5)
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send(embed=err_embed("You don't have permission to use this command."), delete_after=5)
+    else:
+        await ctx.send(embed=err_embed(f"Error: {str(error)}"), delete_after=8)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MEMBER COUNT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="mc", aliases=["membercount", "members"])
+async def mc_cmd(ctx):
+    g = ctx.guild
+    total   = g.member_count
+    humans  = sum(1 for m in g.members if not m.bot)
+    bots    = sum(1 for m in g.members if m.bot)
+    online  = sum(1 for m in g.members if m.status != discord.Status.offline and not m.bot)
+
+    e = discord.Embed(color=0x5865f2)
+    e.description = f"**{g.name}**\n__Total members__ : {total}"
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GIVEAWAY SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+giveaway_store = {}   # msg_id → {channel_id, prize, winners, end_time, host_id, ended}
+
+@bot.command(name="gstart", aliases=["gcreate"])
+@commands.has_permissions(manage_guild=True)
+async def gstart_cmd(ctx, duration: str, winners: int, *, prize: str):
+    td = parse_duration(duration)
+    if not td:
+        return await ctx.send(embed=err_embed("Invalid duration. Use e.g. `1h`, `30m`, `1d`."))
+    if winners < 1:
+        return await ctx.send(embed=err_embed("Winners must be at least 1."))
+
+    end_time  = datetime.now(timezone.utc) + td
+    end_ts    = int(end_time.timestamp())
+    dur_label = fmt_delta(td)
+
+    e = discord.Embed(
+        title=f"<a:Gift:1483344100353642497> {prize} <a:Gift:1483344100353642497>",
+        color=discord.Color.gold(),
+        timestamp=end_time
+    )
+    e.description = (
+        f"\u2022 **Winners:** {winners}\n"
+        f"\u2022 **Ends:** in {dur_label} (<t:{end_ts}:F>)\n"
+        f"\u2022 **Hosted by:** {ctx.author.mention}\n\n"
+        f"\u2022 React with 🎉 to participate!"
+    )
+    # Discord auto-updates <t:ts:R> as live countdown
+    e.set_footer(text=f"Ends at • Today at {end_time.strftime('%H:%M')} • Made by Black Belt")
+    e.add_field(name="⏳ Time Remaining", value=f"<t:{end_ts}:R>", inline=False)
+
+    await ctx.message.delete()
+    msg = await ctx.send(content="🎊 **New Giveaway** 🎊", embed=e)
+    await msg.add_reaction("🎉")
+
+    giveaway_store[msg.id] = {
+        "channel_id": ctx.channel.id,
+        "prize":      prize,
+        "winners":    winners,
+        "end_time":   end_time,
+        "host_id":    ctx.author.id,
+        "ended":      False,
+        "msg_id":     msg.id
+    }
+    # Persist to DB so giveaway survives bot restart
+    try:
+        DB.save_giveaway(msg.id, ctx.channel.id, ctx.guild.id, prize, winners, end_time.isoformat(), ctx.author.id)
+    except Exception as _ge:
+        print(f"[GIVEAWAY] DB save error: {_ge}")
+
+    # Auto-end after duration
+    async def auto_end():
+        await asyncio.sleep(td.total_seconds())
+        await _end_giveaway(msg.id, ctx.guild)
+
+    bot.loop.create_task(auto_end())
+
+
+async def _end_giveaway(msg_id: int, guild: discord.Guild):
+    data = giveaway_store.get(msg_id)
+    if not data or data["ended"]:
+        return
+    data["ended"] = True
+    # Mark ended in DB
+    try: DB.end_giveaway_db(msg_id)
+    except: pass
+
+    ch = guild.get_channel(data["channel_id"])
+    if not ch:
+        return
+    try:
+        msg = await ch.fetch_message(msg_id)
+    except:
+        return
+
+    # Collect reactors
+    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    if reaction:
+        users = [u async for u in reaction.users() if not u.bot]
+    else:
+        users = []
+
+    prize    = data["prize"]
+    n_win    = data["winners"]
+    host     = guild.get_member(data["host_id"])
+    host_str = host.mention if host else "Unknown"
+
+    import random
+    ended_at = datetime.now(timezone.utc).strftime("%d-%m-%Y %H:%M")
+
+    if not users:
+        e = discord.Embed(
+            title=f"<a:Gift:1483344100353642497> {prize} <a:Gift:1483344100353642497>",
+            color=discord.Color.red()
+        )
+        e.description = (
+            f"\u2022 **Hosted by:** {host_str}\n"
+            f"\u2022 **Total participant(s):** 0\n"
+            f"\u2022 **Winner :**\nNo valid entries."
+        )
+        e.set_footer(text=f"Ended \u2022 {ended_at} • Made by Black Belt")
+    else:
+        chosen = random.sample(users, min(n_win, len(users)))
+        winners_str = "\n".join(w.mention for w in chosen)
+        winners_announce = ", ".join(w.mention for w in chosen)
+        e = discord.Embed(
+            title=f"<a:Gift:1483344100353642497> {prize} <a:Gift:1483344100353642497>",
+            color=discord.Color.gold()
+        )
+        e.description = (
+            f"\u2022 **Hosted by:** {host_str}\n"
+            f"\u2022 **Total participant(s):** {len(users)}\n"
+            f"\u2022 **Winner :**\n{winners_str}"
+        )
+        e.set_footer(text=f"Ended \u2022 {ended_at} • Made by Black Belt")
+        await ch.send(
+            f"Congrats, {winners_announce} you have won **{prize}**, hosted by {host_str}"
+        )
+
+    await msg.edit(content="🎊 **Giveaway Ended** 🎊", embed=e)
+
+
+@bot.command(name="gend")
+@commands.has_permissions(manage_guild=True)
+async def gend_cmd(ctx, msg_id: int):
+    if msg_id not in giveaway_store:
+        return await ctx.send(embed=err_embed("Giveaway not found. Check the message ID."))
+    await _end_giveaway(msg_id, ctx.guild)
+    await ctx.send(embed=ok_embed("Giveaway ended!"), delete_after=5)
+
+
+@bot.command(name="greroll")
+@commands.has_permissions(manage_guild=True)
+async def greroll_cmd(ctx, msg_id: int):
+    data = giveaway_store.get(msg_id)
+    if not data:
+        return await ctx.send(embed=err_embed("Giveaway not found. Check the message ID."))
+
+    ch = ctx.guild.get_channel(data["channel_id"])
+    try:
+        msg = await ch.fetch_message(msg_id)
+    except:
+        return await ctx.send(embed=err_embed("Could not fetch giveaway message."))
+
+    reaction = discord.utils.get(msg.reactions, emoji="🎉")
+    if reaction:
+        users = [u async for u in reaction.users() if not u.bot]
+    else:
+        users = []
+
+    if not users:
+        return await ctx.send(embed=err_embed("No valid entries to reroll."))
+
+    import random
+    winner = random.choice(users)
+    host_member = ctx.guild.get_member(data["host_id"])
+    host_str = host_member.mention if host_member else f"<@{data['host_id']}>"
+    ended_at = datetime.now(timezone.utc).strftime("%d-%m-%Y %H:%M")
+    prize = data["prize"]
+
+    # Update the giveaway embed with new winner
+    e = discord.Embed(
+        title=f"<a:Gift:1483344100353642497> {prize} <a:Gift:1483344100353642497>",
+        color=discord.Color.gold()
+    )
+    e.description = (
+        f"\u2022 **Hosted by:** {host_str}\n"
+        f"\u2022 **Total participant(s):** {len(users)}\n"
+        f"\u2022 **Winner :**\n{winner.mention}"
+    )
+    e.set_footer(text=f"Ended \u2022 {ended_at} \u2022 Made by Black Belt")
+    await msg.edit(content="🎊 **Giveaway Ended** 🎊", embed=e)
+
+    await ctx.send(f"Congrats, {winner.mention} you have won **{prize}**, hosted by {host_str}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TIMER SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="tstart", aliases=["timer"])
+async def timer_cmd(ctx, duration: str, *, label: str = "Timer"):
+    td = parse_duration(duration)
+    if not td:
+        return await ctx.send(embed=err_embed("Invalid duration. Use e.g. `10m`, `1h`, `2d`."))
+
+    end_time = datetime.now(timezone.utc) + td
+    end_ts   = int(end_time.timestamp())
+    dur_label = fmt_delta(td)
+
+    e = discord.Embed(color=discord.Color.orange())
+    e.title = f"<a:clock:1483340836467900507> Timer <a:clock:1483340836467900507>"
+    e.description = (
+        f"**{label}**\n\n"
+        f"<a:clock:1483340836467900507> **Ends :** in {dur_label} (<t:{end_ts}:F>) <a:clock:1483340836467900507>"
+    )
+    e.add_field(name="⏳ Time Remaining", value=f"<t:{end_ts}:R>", inline=False)
+    e.set_footer(text=f"Timer ends • Today at {end_time.strftime('%H:%M')} • Made by Black Belt")
+
+    await ctx.message.delete()
+    timer_msg = await ctx.send(embed=e)
+
+    async def fire():
+        await asyncio.sleep(td.total_seconds())
+        done_e = discord.Embed(
+            title="<a:Tick:1483344124357644350> Timer Done!",
+            description=f"⏰ **{label}** timer has ended!\n{ctx.author.mention}",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        await timer_msg.edit(embed=done_e)
+        await ctx.send(content=f"⏰ {ctx.author.mention} your **{label}** timer is done!", delete_after=30)
+
+    bot.loop.create_task(fire())
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ACCOUNT AGE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="accage", aliases=["accountage", "age"])
+async def accage_cmd(ctx, user_id: str = None):
+    try:
+        if user_id:
+            user = await bot.fetch_user(int(user_id))
+        else:
+            user = ctx.author
+    except:
+        return await ctx.send(embed=err_embed("User not found. Check the ID."))
+
+    created = user.created_at
+    now = datetime.now(timezone.utc)
+    diff = now - created
+
+    total_seconds = int(diff.total_seconds())
+    years   = diff.days // 365
+    months  = (diff.days % 365) // 30
+    weeks   = (diff.days % 30) // 7
+    days    = (diff.days % 30) % 7
+    hours   = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+
+    parts = []
+    if years:   parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if months:  parts.append(f"{months} month{'s' if months != 1 else ''}")
+    if weeks:   parts.append(f"{weeks} week{'s' if weeks != 1 else ''}")
+    if days:    parts.append(f"{days} day{'s' if days != 1 else ''}")
+    if hours:   parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes: parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if seconds: parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+
+    age_str = ", ".join(parts) if parts else "Just created"
+    time_str = datetime.now().strftime("%H:%M")
+
+    e = discord.Embed(color=0x5865f2)
+    e.title = f"\U0001f4c5 {user.name}'s Account Age"
+    e.description = age_str
+    e.set_thumbnail(url=user.display_avatar.url)
+    e.set_footer(text=f"Requested by {ctx.author.display_name} \u2022 Today at {time_str} \u2022 Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  INVITED LIST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="invited")
+async def invited_cmd(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    guild_data = invite_tracker.get(ctx.guild.id, {})
+
+    # Find all members invited by target
+    invited_members = []
+    for (guild_id, member_id), inviter_id in member_inviter.items():
+        if guild_id == ctx.guild.id and inviter_id == target.id:
+            invited_members.append(member_id)
+
+    if not invited_members:
+        return await ctx.send(embed=err_embed(f"{target.display_name} has not invited anyone yet."))
+
+    PER_PAGE = 10
+    total_pages = max(1, (len(invited_members) + PER_PAGE - 1) // PER_PAGE)
+    time_str = datetime.now().strftime("%H:%M")
+
+    def make_embed(page: int) -> discord.Embed:
+        start = page * PER_PAGE
+        chunk = invited_members[start:start + PER_PAGE]
+        lines = []
+        for idx, mid in enumerate(chunk):
+            rank = start + idx + 1
+            badge = f"#{rank}"
+            lines.append(f"**{badge}** \u2022 <@{mid}>")
+
+        e = discord.Embed(color=0x5865f2)
+        e.title = f"Invited list of {target.display_name}"
+        e.description = "\n".join(lines)
+        e.set_footer(text=f"Page {page+1}/{total_pages} \u2022 Made by Black Belt")
+        return e
+
+    class InvitedView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.page = 0
+            self.update_buttons()
+
+        def update_buttons(self):
+            self.first_btn.disabled = self.page == 0
+            self.prev_btn.disabled  = self.page == 0
+            self.next_btn.disabled  = self.page >= total_pages - 1
+            self.last_btn.disabled  = self.page >= total_pages - 1
+
+        @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary)
+        async def first_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = 0
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
+        async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = max(0, self.page - 1)
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.primary)
+        async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            self.stop()
+
+        @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
+        async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = min(total_pages - 1, self.page + 1)
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+        @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+        async def last_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.page = total_pages - 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=make_embed(self.page), view=self)
+
+    await ctx.send(embed=make_embed(0), view=InvitedView())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LOG SETUP COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Individual log setters (kept for compatibility) ──────────────────────────
+@bot.command(name="setticketlog")
+@commands.has_permissions(administrator=True)
+async def setticketlog_cmd(ctx, channel: discord.TextChannel = None):
+    # log channel set per-guild via DB
+    ch = channel or ctx.channel
+    # (per-guild only)
+    DB.set_log_channel(ctx.guild.id, "ticket_log", ch.id)
+    _set_guild_log(ctx.guild.id, "ticket_log", ch.id)
+    e = discord.Embed(color=0x57f287)
+    e.description = f"🎫 **Ticket Log** set to {ch.mention}"
+    await ctx.send(embed=ok_embed(f"<a:Announcement:1483344095228461056> Ticket log → {ch.mention}"))
+
+@bot.command(name="setmodlog")
+@commands.has_permissions(administrator=True)
+async def setmodlog_cmd(ctx, channel: discord.TextChannel = None):
+    # log channel set per-guild via DB
+    ch = channel or ctx.channel
+    # (per-guild only)
+    DB.set_log_channel(ctx.guild.id, "mod_log", ch.id)
+    _set_guild_log(ctx.guild.id, "mod_log", ch.id)
+    await ctx.send(embed=ok_embed(f"<a:antinuke:1483344748990435370> Mod log → {ch.mention}"))
+
+@bot.command(name="setbotlog")
+@commands.has_permissions(administrator=True)
+async def setbotlog_cmd(ctx, channel: discord.TextChannel = None):
+    # log channel set per-guild via DB
+    ch = channel or ctx.channel
+    # (per-guild only)
+    DB.set_log_channel(ctx.guild.id, "bot_log", ch.id)
+    _set_guild_log(ctx.guild.id, "bot_log", ch.id)
+    await ctx.send(embed=ok_embed(f"🤖 Bot log → {ch.mention}"))
+
+@bot.command(name="setinvitelog")
+@commands.has_permissions(administrator=True)
+async def setinvitelog_cmd(ctx, channel: discord.TextChannel = None):
+    # log channel set per-guild via DB
+    ch = channel or ctx.channel
+    # (per-guild only)
+    DB.set_log_channel(ctx.guild.id, "invite_log", ch.id)
+    _set_guild_log(ctx.guild.id, "invite_log", ch.id)
+    await ctx.send(embed=ok_embed(f"<a:Announcement:1483344095228461056> Invite log → {ch.mention}"))
+
+# ─── ALL-IN-ONE Setup Panel ────────────────────────────────────────────────────
+class SetupLogsView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=err_embed("<a:disabled1:1483344744024248453> Only the command user can interact with this panel."), ephemeral=True)
+            return False
+        return True
+
+    def _status_embed(self, guild):
+        def ch_str(cid): return f"<#{cid}>" if cid else "<a:disabled1:1483344744024248453> `Not set`"
+        e = discord.Embed(
+            title="⚙️ Empire — Server Setup Panel",
+            description=(
+                "Configure all bot channels and protection from one place.\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            ),
+            color=0x5865f2,
+            timestamp=datetime.now(timezone.utc)
+        )
+        e.add_field(
+            name="<a:Moderation:1483344127071486123> Log Channels",
+            value=(
+                f"<a:Announcement:1483344095228461056> **Ticket Log:** {ch_str(_get_guild_log(guild.id, 'ticket_log'))}\n"
+                f"<a:antinuke:1483344748990435370> **Mod Log:** {ch_str(_get_guild_log(guild.id, 'mod_log'))}\n"
+                f"🤖 **Bot Log:** {ch_str(_get_guild_log(guild.id, 'bot_log'))}\n"
+                f"<a:Announcement:1483344095228461056> **Invite Log:** {ch_str(_get_guild_log(guild.id, 'invite_log'))}"
+            ),
+            inline=True
+        )
+        an_log_id = ANTINUKE_LOG_CHANNEL.get(guild.id)
+        an_status = "<a:enabled:1483344741675569325> ON" if ANTINUKE_ENABLED.get(guild.id) else "<a:disabled1:1483344744024248453> OFF"
+        raid_status = "<a:enabled:1483344741675569325> ON" if _raid_shield.get(guild.id) else "<a:disabled1:1483344744024248453> OFF"
+        wl_u = len(ANTINUKE_WHITELIST.get(guild.id, set()))
+        wl_r = len(ANTINUKE_ROLE_WHITELIST.get(guild.id, set()))
+        e.add_field(
+            name="<a:antinuke:1483344748990435370> Anti-Nuke",
+            value=(
+                f"<a:antinuke:1483344748990435370> **Status:** {an_status}\n"
+                f"<a:POLICE:1483344078547456091> **Raid Shield:** {raid_status}\n"
+                f"<a:Moderation:1483344127071486123> **Alert Log:** {ch_str(an_log_id)}\n"
+                f"<a:Tick:1483344124357644350> **Whitelist:** {wl_u} users, {wl_r} roles"
+            ),
+            inline=True
+        )
+        e.add_field(
+            name="💡 Quick Commands",
+            value=(
+                "`$setuplogs` — This panel\n"
+                "`$setuplogs all #channel` — Set ALL logs to one channel\n"
+                "`$antinuke enable` — Enable anti-nuke\n"
+                "`$antinuke wlrole @role` — Whitelist a role\n"
+                "`$antinuke raid on` — Enable raid shield"
+            ),
+            inline=False
+        )
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.set_footer(text=f"Empire Setup • {guild.name} • Made by Black Belt")
+        return e
+
+    @discord.ui.button(label="🎫 Set Ticket Log", style=discord.ButtonStyle.primary, row=0)
+    async def set_ticket_log(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=discord.Embed(description="📌 **Mention the channel** for Ticket Log in this channel.\nExample: `#ticket-logs`\n-# Auto-cancels in 30s", color=0x5865f2),
+            ephemeral=True)
+        def check(m): return m.author.id == interaction.user.id and m.channel_mentions
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            _set_guild_log(interaction.guild.id, "ticket_log", msg.channel_mentions[0].id)
+            DB.set_log_channel(interaction.guild.id, "ticket_log", msg.channel_mentions[0].id)
+            await msg.delete()
+            await interaction.edit_original_response(
+                embed=discord.Embed(description=f"<a:Tick:1483344124357644350> **Ticket Log** → {msg.channel_mentions[0].mention}", color=0x57f287))
+            await interaction.message.edit(embed=self._status_embed(interaction.guild))
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(embed=err_embed("Timed out."))
+
+    @discord.ui.button(label="🛡️ Set Mod Log", style=discord.ButtonStyle.primary, row=0)
+    async def set_mod_log(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=discord.Embed(description="📌 **Mention the channel** for Mod Log.\nExample: `#mod-logs`\n-# Auto-cancels in 30s", color=0x5865f2),
+            ephemeral=True)
+        def check(m): return m.author.id == interaction.user.id and m.channel_mentions
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            _set_guild_log(interaction.guild.id, "mod_log", msg.channel_mentions[0].id)
+            DB.set_log_channel(interaction.guild.id, "mod_log", msg.channel_mentions[0].id)
+            await msg.delete()
+            await interaction.edit_original_response(
+                embed=discord.Embed(description=f"<a:Tick:1483344124357644350> **Mod Log** → {msg.channel_mentions[0].mention}", color=0x57f287))
+            await interaction.message.edit(embed=self._status_embed(interaction.guild))
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(embed=err_embed("Timed out."))
+
+    @discord.ui.button(label="🤖 Set Bot Log", style=discord.ButtonStyle.secondary, row=0)
+    async def set_bot_log(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=discord.Embed(description="📌 **Mention the channel** for Bot Log.\nExample: `#bot-logs`\n-# Auto-cancels in 30s", color=0x5865f2),
+            ephemeral=True)
+        def check(m): return m.author.id == interaction.user.id and m.channel_mentions
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            _set_guild_log(interaction.guild.id, "bot_log", msg.channel_mentions[0].id)
+            DB.set_log_channel(interaction.guild.id, "bot_log", msg.channel_mentions[0].id)
+            await msg.delete()
+            await interaction.edit_original_response(
+                embed=discord.Embed(description=f"<a:Tick:1483344124357644350> **Bot Log** → {msg.channel_mentions[0].mention}", color=0x57f287))
+            await interaction.message.edit(embed=self._status_embed(interaction.guild))
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(embed=err_embed("Timed out."))
+
+    @discord.ui.button(label="📨 Set Invite Log", style=discord.ButtonStyle.secondary, row=0)
+    async def set_invite_log(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=discord.Embed(description="📌 **Mention the channel** for Invite Log.\nExample: `#invite-logs`\n-# Auto-cancels in 30s", color=0x5865f2),
+            ephemeral=True)
+        def check(m): return m.author.id == interaction.user.id and m.channel_mentions
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            _set_guild_log(interaction.guild.id, "invite_log", msg.channel_mentions[0].id)
+            DB.set_log_channel(interaction.guild.id, "invite_log", msg.channel_mentions[0].id)
+            await msg.delete()
+            await interaction.edit_original_response(
+                embed=discord.Embed(description=f"<a:Tick:1483344124357644350> **Invite Log** → {msg.channel_mentions[0].mention}", color=0x57f287))
+            await interaction.message.edit(embed=self._status_embed(interaction.guild))
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(embed=err_embed("Timed out."))
+
+    @discord.ui.button(label="🛡️ Set Anti-Nuke Log", style=discord.ButtonStyle.danger, row=1)
+    async def set_antinuke_log(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=discord.Embed(description="📌 **Mention the channel** for Anti-Nuke alerts.\nExample: `#security-logs`\n-# Auto-cancels in 30s", color=0x5865f2),
+            ephemeral=True)
+        def check(m): return m.author.id == interaction.user.id and m.channel_mentions
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=30)
+            ANTINUKE_LOG_CHANNEL[interaction.guild.id] = msg.channel_mentions[0].id
+            await msg.delete()
+            await interaction.edit_original_response(
+                embed=discord.Embed(description=f"<a:Tick:1483344124357644350> **Anti-Nuke Log** → {msg.channel_mentions[0].mention}", color=0x57f287))
+            await interaction.message.edit(embed=self._status_embed(interaction.guild))
+        except asyncio.TimeoutError:
+            await interaction.edit_original_response(embed=err_embed("Timed out."))
+
+    @discord.ui.button(label="🛡️ Toggle Anti-Nuke", style=discord.ButtonStyle.danger, row=1)
+    async def toggle_antinuke(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild.id
+        current = ANTINUKE_ENABLED.get(gid, False)
+        ANTINUKE_ENABLED[gid] = not current
+        new_state = "<a:enabled:1483344741675569325> **ENABLED**" if not current else "<a:disabled1:1483344744024248453> **DISABLED**"
+        color = 0x57f287 if not current else 0xed4245
+        await interaction.response.send_message(
+            embed=discord.Embed(description=f"<a:antinuke:1483344748990435370> Anti-Nuke is now {new_state}", color=color),
+            ephemeral=True)
+        await interaction.message.edit(embed=self._status_embed(interaction.guild))
+
+    @discord.ui.button(label="🚔 Toggle Raid Shield", style=discord.ButtonStyle.danger, row=1)
+    async def toggle_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild.id
+        current = _raid_shield.get(gid, False)
+        _raid_shield[gid] = not current
+        new_state = "<a:enabled:1483344741675569325> **ENABLED**" if not current else "<a:disabled1:1483344744024248453> **DISABLED**"
+        color = 0x57f287 if not current else 0xed4245
+        await interaction.response.send_message(
+            embed=discord.Embed(description=f"<a:POLICE:1483344078547456091> Raid Shield is now {new_state}", color=color),
+            ephemeral=True)
+        await interaction.message.edit(embed=self._status_embed(interaction.guild))
+
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=self._status_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="✅ Done", style=discord.ButtonStyle.success, row=2)
+    async def done_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        final = self._status_embed(interaction.guild)
+        final.title = "<a:Tick:1483344124357644350> Empire — Setup Complete!"
+        final.color = 0x57f287
+        await interaction.response.edit_message(embed=final, view=self)
+        self.stop()
+
+
+@bot.command(name="setuplogs", aliases=["setup"])
+@commands.has_permissions(administrator=True)
+async def setuplogs_cmd(ctx, mode: str = None, channel: discord.TextChannel = None):
+    """Interactive setup panel for all log channels + anti-nuke."""
+    # log channel set per-guild via DB
+
+    # $setuplogs all #channel — set ALL logs to one channel
+    if mode and mode.lower() == "all":
+        ch = channel or ctx.channel
+        gid = ctx.guild.id
+        # Per-guild only — never touch global vars (public bot)
+        ANTINUKE_LOG_CHANNEL[gid] = ch.id
+        for lt in ("ticket_log", "mod_log", "bot_log", "invite_log"):
+            DB.set_log_channel(gid, lt, ch.id)
+            _set_guild_log(gid, lt, ch.id)
+        DB.set_antinuke(gid, log_channel=ch.id)
+        e = discord.Embed(
+            title="<a:Tick:1483344124357644350> All Logs Set!",
+            description=(
+                f"All log channels have been set to {ch.mention}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<a:Announcement:1483344095228461056> Ticket Log → {ch.mention}\n"
+                f"<a:antinuke:1483344748990435370> Mod Log → {ch.mention}\n"
+                f"🤖 Bot Log → {ch.mention}\n"
+                f"<a:Announcement:1483344095228461056> Invite Log → {ch.mention}\n"
+                f"<a:antinuke:1483344748990435370> Anti-Nuke Log → {ch.mention}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 Use `$antinuke enable` to turn on protection!"
+            ),
+            color=0x57f287,
+            timestamp=datetime.now(timezone.utc)
+        )
+        e.set_footer(text="Empire Setup • Made by Black Belt")
+        return await ctx.send(embed=e)
+
+    # Interactive panel
+    view = SetupLogsView(ctx.author.id)
+    await ctx.send(embed=view._status_embed(ctx.guild), view=view)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BOT LOG EVENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Per-guild log channel cache (loaded from DB or set via commands)
+_guild_logs = {}  # guild_id → {"bot_log": id, "mod_log": id, "invite_log": id, "ticket_log": id}
+
+def _get_guild_log(guild_id: int, log_type: str) -> int:
+    """Get per-guild log channel ID — always fresh from DB."""
+    row = DB.get_guild(guild_id)
+    _guild_logs[guild_id] = {
+        "bot_log":    row.get("bot_log")    or 0,
+        "mod_log":    row.get("mod_log")    or 0,
+        "invite_log": row.get("invite_log") or 0,
+        "ticket_log": row.get("ticket_log") or 0,
+    }
+    return _guild_logs[guild_id].get(log_type, 0)
+
+def _set_guild_log(guild_id: int, log_type: str, ch_id: int):
+    if guild_id not in _guild_logs:
+        _guild_logs[guild_id] = {}
+    _guild_logs[guild_id][log_type] = ch_id
+
+async def send_bot_log(guild, title, description, color=0x5865f2):
+    # Per-guild channel first, then global fallback
+    ch_id = _get_guild_log(guild.id, "bot_log")
+    if not ch_id: return
+    ch = guild.get_channel(ch_id)
+    if not ch: return
+    e = discord.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    try:
+        await ch.send(embed=e)
+    except: pass
+
+async def send_mod_log_pg(guild, action, target, target_id, mod, reason, color=None):
+    """Per-guild mod log."""
+    ch_id = _get_guild_log(guild.id, "mod_log")
+    if not ch_id: return
+    ch = guild.get_channel(ch_id)
+    if not ch: return
+    e = discord.Embed(title=f"<a:Moderation:1483344127071486123> {action}", color=color or 0xfee75c, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="👤 Target",     value=f"{target} ({target_id})", inline=True)
+    e.add_field(name="<a:antinuke:1483344748990435370> Moderator", value=str(mod), inline=True)
+    e.add_field(name="📝 Reason",     value=reason or "No reason", inline=False)
+    e.set_footer(text=f"ID: {target_id} • Empire Development™")
+    try:
+        await ch.send(embed=e)
+    except: pass
+
+# NOTE: on_member_join and on_member_remove are handled in the Anti-Nuke section below
+
+@bot.event
+async def on_member_unban(guild, user):
+    await send_bot_log(guild,
+        "<a:Tick:1483344124357644350> Member Unbanned",
+        f"**{user}**\nID: `{user.id}`",
+        0x57f287)
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot or not message.guild or not message.content: return
+
+    await send_bot_log(message.guild,
+        "🗑️ Message Deleted",
+        f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n{message.content[:500]}",
+        0xfee75c)
+
+    # ── Ghost Ping Detection ──────────────────────────────────────────────────
+    guild = message.guild
+    user_id = message.author.id
+    if _is_antinuke_enabled(guild.id) and not _is_whitelisted(guild.id, user_id):
+        # Check if deleted message had user/role/everyone mentions
+        had_mention = (
+            len(message.mentions) > 0 or
+            len(message.role_mentions) > 0 or
+            message.mention_everyone
+        )
+        if had_mention:
+            now = time.time()
+            gph = _ghost_ping_history[guild.id][user_id]
+            _ghost_ping_history[guild.id][user_id] = [t for t in gph if now - t < GHOST_PING_WIN]
+            _ghost_ping_history[guild.id][user_id].append(now)
+
+            # Alert on first ghost ping
+            targets = ", ".join(m.display_name for m in message.mentions[:5])
+            if message.mention_everyone:
+                targets = "@everyone / @here"
+            elif message.role_mentions:
+                targets = ", ".join(r.name for r in message.role_mentions[:3])
+
+            e = discord.Embed(
+                title="👻  Ghost Ping Detected",
+                description=(
+                    f"{message.author.mention} pinged **{targets}** then deleted the message.\n"
+                    f"```yaml\nChannel: #{message.channel.name}\nContent: {message.content[:200]}\n```"
+                ),
+                color=0xffa500,
+                timestamp=datetime.now(timezone.utc)
+            )
+            e.set_thumbnail(url=message.author.display_avatar.url)
+            e.set_footer(
+                text=f"Empire Anti Ghost-Ping • Made by Black Belt",
+                icon_url=guild.me.display_avatar.url
+            )
+            log_ch_id = ANTINUKE_LOG_CHANNEL.get(guild.id) or _get_guild_log(guild.id, "mod_log")
+            if log_ch_id:
+                ch = guild.get_channel(log_ch_id)
+                if ch:
+                    try:
+                        await ch.send(embed=e)
+                    except:
+                        pass
+
+            # Punish if repeat ghost pinger
+            if len(_ghost_ping_history[guild.id][user_id]) >= GHOST_PING_MAX:
+                _ghost_ping_history[guild.id][user_id].clear()
+                try:
+                    punishment_mode = ANTINUKE_PUNISHMENT.get(guild.id, "kick")
+                    action_str = "Kicked"
+                    if punishment_mode == "ban":
+                        await guild.ban(message.author, reason=f"[Empire] Repeated ghost pinging ({GHOST_PING_MAX}x in {GHOST_PING_WIN}s)", delete_message_days=0)
+                        action_str = "Banned"
+                    else:
+                        await message.author.kick(reason=f"[Empire] Repeated ghost pinging ({GHOST_PING_MAX}x in {GHOST_PING_WIN}s)")
+                        action_str = "Kicked"
+                    await message.channel.send(
+                        embed=discord.Embed(
+                            title="👻 Repeated Ghost Pinger Punished",
+                            description=f"{message.author.mention} **{action_str}** for repeated ghost pinging.",
+                            color=0xff0000
+                        ).set_footer(text="Empire Prime Security • Made by Black Belt"),
+                        delete_after=15
+                    )
+                except:
+                    pass
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or not before.guild: return
+    if before.content == after.content: return
+    await send_bot_log(before.guild,
+        "✏️ Message Edited",
+        f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:** {before.content[:300]}\n**After:** {after.content[:300]}",
+        0x5865f2)
+
+
+# ─── Comprehensive Activity Logs ──────────────────────────────────────────────
+
+DANGEROUS_ROLE_PERMS = [
+    "administrator", "ban_members", "kick_members",
+    "manage_guild", "manage_roles", "manage_channels",
+    "manage_webhooks", "mention_everyone",
+    "manage_nicknames", "manage_expressions",
+]
+
+
+@bot.event
+async def on_guild_update(before, after):
+    """Log every server setting change + antinuke alert."""
+    changes = []
+    if before.name != after.name:
+        changes.append(f"**Name:** `{before.name}` -> `{after.name}`")
+    if before.icon != after.icon:
+        changes.append("**Server Icon** changed")
+    if before.banner != after.banner:
+        changes.append("**Server Banner** changed")
+    if before.description != after.description:
+        changes.append("**Description** changed")
+    if before.verification_level != after.verification_level:
+        changes.append(f"**Verification Level:** `{before.verification_level}` -> `{after.verification_level}`")
+    if before.explicit_content_filter != after.explicit_content_filter:
+        changes.append(f"**Content Filter:** `{before.explicit_content_filter}` -> `{after.explicit_content_filter}`")
+    if before.mfa_level != after.mfa_level:
+        changes.append(f"**2FA Requirement:** `{before.mfa_level}` -> `{after.mfa_level}`")
+    if not changes:
+        return
+    desc = "\n".join(changes)
+    if ANTINUKE_ENABLED.get(after.id):
+        try:
+            async for entry in after.audit_logs(limit=1, action=discord.AuditLogAction.guild_update):
+                actor_id = entry.user.id
+                if not _is_whitelisted(after.id, actor_id):
+                    await _send_antinuke_alert(after, "Server Settings Changed",
+                        f"<@{actor_id}> modified server settings:\n{desc}")
+        except:
+            pass
+    await send_bot_log(after, "Server Updated", desc, 0xfee75c)
+
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    """Log channel name/topic/slowmode/permission changes."""
+    changes = []
+    if before.name != after.name:
+        changes.append(f"**Name:** `{before.name}` -> `{after.name}`")
+    if hasattr(before, "topic") and before.topic != after.topic:
+        changes.append("**Topic** changed")
+    if hasattr(before, "slowmode_delay") and before.slowmode_delay != after.slowmode_delay:
+        changes.append(f"**Slowmode:** `{before.slowmode_delay}s` -> `{after.slowmode_delay}s`")
+    if before.overwrites != after.overwrites:
+        changes.append("**Permissions** modified")
+    if not changes:
+        return
+    await send_bot_log(after.guild, "Channel Updated",
+        f"**Channel:** {after.mention}\n" + "\n".join(changes), 0xfee75c)
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    """Log role changes + antinuke admin perm detection."""
+    guild = after.guild
+    changes = []
+    if before.name != after.name:
+        changes.append(f"**Name:** `{before.name}` -> `{after.name}`")
+    if before.color != after.color:
+        changes.append(f"**Color:** `{before.color}` -> `{after.color}`")
+    if before.hoist != after.hoist:
+        changes.append(f"**Hoisted:** `{before.hoist}` -> `{after.hoist}`")
+    if before.mentionable != after.mentionable:
+        changes.append(f"**Mentionable:** `{before.mentionable}` -> `{after.mentionable}`")
+    if before.permissions != after.permissions:
+        old_p = set(p for p, v in before.permissions if v)
+        new_p = set(p for p, v in after.permissions if v)
+        added_p   = new_p - old_p
+        removed_p = old_p - new_p
+        if added_p:
+            changes.append("**Perms Added:** `" + "`, `".join(added_p) + "`")
+        if removed_p:
+            changes.append("**Perms Removed:** `" + "`, `".join(removed_p) + "`")
+    if changes:
+        await send_bot_log(guild, "Role Updated",
+            f"**Role:** {after.mention}\n" + "\n".join(changes), 0xfee75c)
+    # Antinuke: dangerous perm granted
+    if _is_antinuke_enabled(guild.id):
+        if not before.permissions.administrator and after.permissions.administrator:
+            try:
+                async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_update):
+                    actor_id = entry.user.id
+                    if _is_whitelisted(guild.id, actor_id):
+                        return
+                    if _record_action(guild.id, actor_id, "role_everyone"):
+                        await _punish_nuker(guild, actor_id, "role_everyone",
+                            f"Granted Administrator to role `{after.name}`")
+                    else:
+                        await _send_antinuke_alert(guild, "Dangerous Role Edit",
+                            f"<@{actor_id}> added **Administrator** to role `{after.name}`.\n"
+                            f"If unintentional, review immediately.")
+            except:
+                pass
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Log nickname/role/timeout changes + dangerous role assign detection + boost detection."""
+    guild = after.guild
+
+    # ── Boost detection ───────────────────────────────────────────────────────
+    if not before.premium_since and after.premium_since:
+        try:
+            bcfg = _get_welcome_cfg(guild.id, 'boost')
+            if bcfg.get('enabled') and int(bcfg.get('channel_id', 0)):
+                bch = guild.get_channel(int(bcfg['channel_id']))
+                if bch:
+                    await bch.send(embed=_build_welcome_embed(bcfg, after, guild, 'boost'))
+        except Exception as _be:
+            print(f"[Welcome/Boost] Error: {_be}")
+
+    log_lines = []
+
+    if before.nick != after.nick:
+        old_n = before.nick or before.name
+        new_n = after.nick or after.name
+        log_lines.append(f"**Nickname:** `{old_n}` -> `{new_n}`")
+
+    added_roles   = set(after.roles) - set(before.roles)
+    removed_roles = set(before.roles) - set(after.roles)
+    if added_roles:
+        log_lines.append("**Roles Added:** " + ", ".join(r.mention for r in added_roles))
+    if removed_roles:
+        log_lines.append("**Roles Removed:** " + ", ".join(r.mention for r in removed_roles))
+
+    if before.timed_out_until != after.timed_out_until:
+        if after.timed_out_until:
+            log_lines.append(f"**Timed Out Until:** <t:{int(after.timed_out_until.timestamp())}:F>")
+        else:
+            log_lines.append("**Timeout Removed**")
+
+    if log_lines:
+        await send_bot_log(guild, "Member Updated",
+            f"**Member:** {after.mention} (`{after.id}`)\n" + "\n".join(log_lines), 0x5865f2)
+
+    # ── Dangerous Role Assign Detection (Antinuke) ───────────────────────────
+    if not ANTINUKE_ENABLED.get(guild.id) or not added_roles:
+        return
+    dangerous_added = [
+        r for r in added_roles
+        if any(getattr(r.permissions, p, False) for p in DANGEROUS_ROLE_PERMS)
+    ]
+    if not dangerous_added:
+        return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.member_role_update):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id):
+                return
+            if "member_dangerous" in ANTINUKE_EVENT_WHITELIST[guild.id].get(actor_id, set()):
+                return
+            role_names = ", ".join(f"`{r.name}`" for r in dangerous_added)
+            for role in dangerous_added:
+                try:
+                    await after.remove_roles(role, reason="[Empire Anti-Nuke] Auto-removed dangerous role")
+                except Exception:
+                    pass
+            await _punish_nuker(guild, actor_id, "role_everyone",
+                f"Assigned dangerous role(s) {role_names} to {after} ({after.id})")
+            log_ch_id = ANTINUKE_LOG_CHANNEL.get(guild.id) or _get_guild_log(guild.id, "mod_log")
+            if log_ch_id:
+                ch = guild.get_channel(log_ch_id)
+                if ch:
+                    e = discord.Embed(
+                        title="<a:POLICE:1483344078547456091>  DANGEROUS ROLE ASSIGN - BLOCKED",
+                        color=0xff0000, timestamp=datetime.now(timezone.utc))
+                    e.description = (
+                        "```ansi\n"
+                        "\u001b[1;31m"
+                        "  WARNING: UNAUTHORIZED ROLE ASSIGNMENT\n"
+                        "\u001b[0m\n"
+                        "```"
+                    )
+                    e.add_field(name="Actor (Punished)", value=f"<@{actor_id}> | `ID: {actor_id}`", inline=True)
+                    e.add_field(name="Target Member", value=f"{after.mention} | `ID: {after.id}`", inline=True)
+                    e.add_field(name="Dangerous Roles Removed", value=role_names, inline=False)
+                    e.add_field(name="Punishment Applied",
+                        value=f"`{ANTINUKE_PUNISHMENT.get(guild.id, 'ban').upper()}`", inline=True)
+                    e.set_thumbnail(url=after.display_avatar.url)
+                    e.set_footer(text=f"Empire Anti-Nuke | {guild.name} | Made by Black Belt",
+                        icon_url=guild.me.display_avatar.url)
+                    try:
+                        await ch.send(embed=e)
+                    except Exception:
+                        pass
+            return
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Log voice join/leave/move/server-mute/server-deaf."""
+    guild = member.guild
+    if before.channel is None and after.channel is not None:
+        await send_bot_log(guild, "Voice Joined",
+            f"{member.mention} joined **{after.channel.name}**", 0x57f287)
+    elif before.channel is not None and after.channel is None:
+        await send_bot_log(guild, "Voice Left",
+            f"{member.mention} left **{before.channel.name}**", 0xed4245)
+    elif before.channel != after.channel:
+        await send_bot_log(guild, "Voice Moved",
+            f"{member.mention} moved **{before.channel.name}** -> **{after.channel.name}**", 0xfee75c)
+    if not before.mute and after.mute:
+        await send_bot_log(guild, "Server Muted",
+            f"{member.mention} was **server muted**", 0xed4245)
+    if not before.deaf and after.deaf:
+        await send_bot_log(guild, "Server Deafened",
+            f"{member.mention} was **server deafened**", 0xed4245)
+
+
+@bot.event
+async def on_invite_create(invite):
+    """Log new invite creation."""
+    creator = invite.inviter.mention if invite.inviter else "Unknown"
+    uses    = f"`{invite.max_uses}`" if invite.max_uses else "`Unlimited`"
+    expires = f"<t:{int(invite.expires_at.timestamp())}:R>" if invite.expires_at else "`Never`"
+    await send_bot_log(invite.guild, "Invite Created",
+        f"**Code:** `{invite.code}`\n**By:** {creator}\n**Channel:** {invite.channel.mention}\n**Max Uses:** {uses}\n**Expires:** {expires}",
+        0x57f287)
+
+
+@bot.event
+async def on_invite_delete(invite):
+    """Log invite deletion."""
+    await send_bot_log(invite.guild, "Invite Deleted",
+        f"**Code:** `{invite.code}`\n**Channel:** {invite.channel.mention if invite.channel else 'Unknown'}",
+        0xed4245)
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    """Log emoji add/remove."""
+    added   = set(after) - set(before)
+    removed = set(before) - set(after)
+    if added:
+        await send_bot_log(guild, "Emojis Added",
+            "\n".join(f"{e} `:{e.name}:`" for e in added), 0x57f287)
+    if removed:
+        await send_bot_log(guild, "Emojis Removed",
+            "\n".join(f"`:{e.name}:` (ID: `{e.id}`)" for e in removed), 0xed4245)
+
+
+@bot.event
+async def on_guild_stickers_update(guild, before, after):
+    """Log sticker add/remove."""
+    added   = set(after) - set(before)
+    removed = set(before) - set(after)
+    if added:
+        await send_bot_log(guild, "Stickers Added",
+            "\n".join(f"`{s.name}`" for s in added), 0x57f287)
+    if removed:
+        await send_bot_log(guild, "Stickers Removed",
+            "\n".join(f"`{s.name}`" for s in removed), 0xed4245)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ███████╗███████╗ ██████╗██╗   ██╗██████╗ ██╗████████╗██╗   ██╗
+#  ██╔════╝██╔════╝██╔════╝██║   ██║██╔══██╗██║╚══██╔══╝╚██╗ ██╔╝
+#  ███████╗█████╗  ██║     ██║   ██║██████╔╝██║   ██║    ╚████╔╝
+#  ╚════██║██╔══╝  ██║     ██║   ██║██╔══██╗██║   ██║     ╚██╔╝
+#  ███████║███████╗╚██████╗╚██████╔╝██║  ██║██║   ██║      ██║
+#  ╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝      ╚═╝
+#  ANTI-NUKE & SECURITY SYSTEM — Empire Edition
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import time
+import hashlib
+import hmac
+import json
+
+# ─── Anti-Nuke Config ────────────────────────────────────────────────────────
+ANTINUKE_ENABLED         = {}                  # guild_id → bool
+ANTINUKE_WHITELIST       = defaultdict(set)    # guild_id → {user_id, ...}
+ANTINUKE_ROLE_WHITELIST  = defaultdict(set)    # guild_id → {role_id, ...}
+ANTINUKE_LOG_CHANNEL     = {}                  # guild_id → channel_id
+ANTINUKE_OWNER_ONLY      = {}                  # guild_id → bool
+
+# Punishment modes: "ban" | "kick" | "strip" (strip admin roles only)
+ANTINUKE_PUNISHMENT      = {}  # guild_id → "ban" | "kick" | "strip"
+
+# Per-event whitelist: guild_id → user_id → {event_keys}
+ANTINUKE_EVENT_WHITELIST = defaultdict(lambda: defaultdict(set))
+
+# Anti-spam config
+ANTISPAM_ENABLED         = {}  # guild_id → bool
+
+# ─── Automod Config ───────────────────────────────────────────────────────────
+AUTOMOD_SETTINGS    = {}   # guild_id → {feature: bool}
+AUTOMOD_LOG_CHANNEL = {}   # guild_id → channel_id  (separate from antinuke log)
+AUTOMOD_PUNISHMENT  = {}   # guild_id → {feature: "mute"|"delete"|"kick"|"ban"}
+AUTOMOD_WL_ROLES    = defaultdict(set)  # guild_id → {role_id} bypass automod
+AUTOMOD_TIMEOUTS    = {}   # guild_id → {feature: minutes}  (configurable timeout duration)
+
+_DEFAULT_TIMEOUTS = {
+    "spam": 10, "caps": 10, "links": 15, "invites": 15,  # upgraded — more strict
+    "emoji_spam": 10, "nsfw_links": 60, "ext_apps": 15,
+    "token_spam": 60, "mass_mention": 20,
+    "discord_links": 15,
+}
+
+def _get_timeout_mins(gid, feature):
+    t = AUTOMOD_TIMEOUTS.get(gid, {})
+    return t.get(feature, _DEFAULT_TIMEOUTS.get(feature, 10))
+_caps_threshold   = 0.60   # 60% caps = trigger (more strict)
+_emoji_max        = 6      # max 6 emojis per message (was 10 — more strict)
+_invite_pattern   = __import__('re').compile(r'discord(?:\.gg|app\.com/invite)/[a-zA-Z0-9]+')
+_link_pattern     = __import__('re').compile(r'https?://\S+')
+_nsfw_domains     = ["pornhub", "xvideos", "xnxx", "onlyfans", "rule34", "e621"]
+_token_pattern    = __import__('re').compile(r'[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}')
+_ext_app_pattern  = __import__('re').compile(r'(mee6\.xyz|carl\.gg|tatsu\.gg|top\.gg|discordbotlist\.com)')
+
+def _get_automod(gid):
+    """Always fresh from DB so dashboard changes apply instantly."""
+    db_cfg = DB.get_automod(gid)
+    if db_cfg.get("settings"):
+        AUTOMOD_SETTINGS[gid] = db_cfg["settings"]
+    elif gid not in AUTOMOD_SETTINGS:
+        AUTOMOD_SETTINGS[gid] = {
+            "mass_mention": False, "spam": False, "caps": False,
+            "links": False, "invites": False, "discord_links": False,
+            "emoji_spam": False, "nsfw_links": False, "ext_apps": False, "token_spam": False,
+        }
+    if db_cfg.get("punishment"):
+        AUTOMOD_PUNISHMENT[gid] = db_cfg["punishment"]
+    elif gid not in AUTOMOD_PUNISHMENT:
+        AUTOMOD_PUNISHMENT[gid] = {
+            "mass_mention": "kick", "spam": "kick", "caps": "mute",
+            "links": "mute", "invites": "kick", "discord_links": "mute",
+            "emoji_spam": "mute", "nsfw_links": "kick", "ext_apps": "mute", "token_spam": "ban",
+        }
+    if db_cfg.get("wl_roles"):
+        AUTOMOD_WL_ROLES[gid] = db_cfg["wl_roles"]
+    return AUTOMOD_SETTINGS[gid]
+
+def _is_automod_whitelisted(guild, member):
+    """Check if member has a role whitelisted for automod."""
+    wl = AUTOMOD_WL_ROLES.get(guild.id, set())
+    return any(r.id in wl for r in member.roles)
+_spam_history            = defaultdict(lambda: defaultdict(list))  # guild→user→[ts]
+SPAM_MSG_MAX             = 7   # 7 messages
+SPAM_MSG_WIN             = 10  # in 10 seconds
+SPAM_TIMEOUT_MINS        = 10  # timeout duration in minutes
+
+# Ghost ping tracking
+_ghost_ping_history      = defaultdict(lambda: defaultdict(list))  # guild→user→[ts]
+GHOST_PING_MAX           = 3   # 3 ghost pings in 30s
+GHOST_PING_WIN           = 30
+
+# Threshold: max actions per window before triggering
+NUKE_THRESHOLDS = {
+    "ban":            (3, 10),   # 3 bans in 10s
+    "kick":           (4, 10),   # 4 kicks in 10s
+    "channel_delete": (2, 10),   # 2 channel deletes in 10s  [tightened]
+    "channel_create": (3, 10),   # 3 channel creates in 10s  [tightened]
+    "role_delete":    (2, 10),   # 2 role deletes in 10s     [tightened]
+    "role_create":    (3, 10),   # 3 role creates in 10s     [tightened]
+    "role_everyone":  (1, 5),    # 1 everyone-perm role edit in 5s
+    "webhook_create": (2, 10),   # 2 webhook creates in 10s  [tightened]
+    "mass_mention":   (3, 8),    # 3 @everyone/@here in 8s   [tightened]
+    "bot_add":        (1, 10),   # 1 bot add in 10s          [tightened]
+}
+
+# Action history: guild_id → user_id → action_type → [timestamps]
+_nuke_history = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+
+# Punished users this session
+_nuked_punished = defaultdict(set)  # guild_id → {user_id}
+
+# ─── Token & Rate-Limit Security ──────────────────────────────────────────────
+# Track bot command abuse
+_cmd_rate     = defaultdict(lambda: defaultdict(list))  # guild→user→[ts]
+CMD_RATE_MAX  = 10   # max 10 commands
+CMD_RATE_WIN  = 5    # per 5 seconds
+_blocked_users = defaultdict(set)  # guild_id → {user_id} (rate-limited)
+
+# ─── Quarantine / Lockdown ────────────────────────────────────────────────────
+_lockdown_active = {}   # guild_id → bool
+_quarantine_role = {}   # guild_id → role_id
+
+# ─── Raid Shield ─────────────────────────────────────────────────────────────
+_raid_shield    = {}   # guild_id → bool
+_join_times     = defaultdict(list)  # guild_id → [timestamps]
+RAID_JOIN_COUNT = 8    # 8 joins
+RAID_JOIN_WIN   = 5    # in 5 seconds = raid detected
+
+# ─── Anti-Nuke Helpers ────────────────────────────────────────────────────────
+
+def _is_whitelisted(guild_id: int, user_id: int) -> bool:
+    """Check whitelist — always sync from DB so dashboard changes apply instantly."""
+    guild = bot.get_guild(guild_id)
+    if not guild: return True
+    if user_id == guild.owner_id: return True
+    # Sync from DB
+    ANTINUKE_WHITELIST[guild_id] = DB.wl_get_users(guild_id)
+    ANTINUKE_ROLE_WHITELIST[guild_id] = DB.wl_get_roles(guild_id)
+    if user_id in ANTINUKE_WHITELIST[guild_id]: return True
+    member = guild.get_member(user_id)
+    if member:
+        if any(r.id in ANTINUKE_ROLE_WHITELIST[guild_id] for r in member.roles):
+            return True
+    return False
+
+def _is_antinuke_enabled(guild_id: int) -> bool:
+    """Check antinuke enabled — always fresh from DB."""
+    cfg = DB.get_antinuke(guild_id)
+    ANTINUKE_ENABLED[guild_id] = bool(cfg.get("enabled", 0))
+    if cfg.get("punishment"):
+        ANTINUKE_PUNISHMENT[guild_id] = cfg["punishment"]
+    if cfg.get("log_channel"):
+        ANTINUKE_LOG_CHANNEL[guild_id] = cfg["log_channel"]
+    _raid_shield[guild_id] = bool(cfg.get("raid_shield", 0))
+    return ANTINUKE_ENABLED[guild_id]
+
+def _record_action(guild_id: int, user_id: int, action: str) -> bool:
+    """
+    Record an action. Returns True if threshold exceeded (nuke detected).
+    """
+    now = time.time()
+    limit, window = NUKE_THRESHOLDS.get(action, (5, 10))
+    history = _nuke_history[guild_id][user_id][action]
+    # Purge old timestamps outside window
+    _nuke_history[guild_id][user_id][action] = [t for t in history if now - t < window]
+    _nuke_history[guild_id][user_id][action].append(now)
+    return len(_nuke_history[guild_id][user_id][action]) >= limit
+
+# Actions jisme HAMESHA BAN hoga (chahe guild mode kuch bhi ho)
+_ALWAYS_BAN_ACTIONS = {
+    "role_everyone",   # dangerous permission role create/assign
+    "bot_add",         # unauthorized bot add
+    "ban",             # mass ban attempt
+}
+
+# Actions jisme HAMESHA KICK hoga
+_ALWAYS_KICK_ACTIONS = {
+    "channel_delete",  # channel delete
+    "channel_create",  # channel create
+    "role_delete",     # role delete (non-dangerous)
+    "role_create",     # role create (non-dangerous)
+    "webhook_create",  # webhook spam
+    "kick",            # mass kick attempt
+    "mass_mention",    # @everyone spam
+}
+
+async def _punish_nuker(guild: discord.Guild, user_id: int, action: str, reason: str):
+    """Punish the nuke attacker — action-based smart punishment:
+       Dangerous actions (bot add, dangerous role, mass ban) → BAN
+       Moderate actions (channel/role delete/create, etc.)  → KICK
+    """
+    if user_id in _nuked_punished[guild.id]:
+        return
+    _nuked_punished[guild.id].add(user_id)
+
+    member     = guild.get_member(user_id)
+    user_str   = str(member) if member else "Unknown User"
+    user_tag   = f"<@{user_id}>"
+    avatar_url = member.display_avatar.url if member else guild.me.display_avatar.url
+
+    punishment_result = "⚠️ Action failed"
+
+    # ── Smart action-based punishment ────────────────────────────────────────
+    if action in _ALWAYS_BAN_ACTIONS:
+        # Critical/dangerous action → HAMESHA BAN
+        try:
+            await guild.ban(
+                discord.Object(id=user_id),
+                reason=f"[Empire Anti-Nuke] Auto-ban: {reason}",
+                delete_message_days=0
+            )
+            punishment_result = "<a:ARedArrow:1483344139452940338> **BANNED** from server"
+        except Exception as ex:
+            punishment_result = f"<a:disabled1:1483344744024248453> Ban failed: `{ex}`"
+
+    elif action in _ALWAYS_KICK_ACTIONS:
+        # Moderate action → HAMESHA KICK
+        try:
+            if member:
+                await member.kick(reason=f"[Empire Anti-Nuke] Auto-kick: {reason}")
+            punishment_result = "👢 **KICKED** from server"
+        except Exception as ex:
+            # Kick fail hone par ban try karo
+            try:
+                await guild.ban(
+                    discord.Object(id=user_id),
+                    reason=f"[Empire Anti-Nuke] Kick failed, auto-ban: {reason}",
+                    delete_message_days=0
+                )
+                punishment_result = "<a:ARedArrow:1483344139452940338> **BANNED** (kick failed)"
+            except Exception as ex2:
+                punishment_result = f"<a:disabled1:1483344744024248453> Both failed: `{ex2}`"
+
+    else:
+        # Unknown/other action → guild mode follow karo (fallback)
+        mode = ANTINUKE_PUNISHMENT.get(guild.id, "ban")
+        if mode == "ban":
+            try:
+                await guild.ban(
+                    discord.Object(id=user_id),
+                    reason=f"[Empire Anti-Nuke] Auto-ban: {reason}",
+                    delete_message_days=0
+                )
+                punishment_result = "<a:ARedArrow:1483344139452940338> **BANNED** from server"
+            except Exception as ex:
+                punishment_result = f"<a:disabled1:1483344744024248453> Ban failed: `{ex}`"
+        elif mode == "kick":
+            try:
+                if member:
+                    await member.kick(reason=f"[Empire Anti-Nuke] Auto-kick: {reason}")
+                punishment_result = "👢 **KICKED** from server"
+            except Exception as ex:
+                punishment_result = f"<a:disabled1:1483344744024248453> Kick failed: `{ex}`"
+        elif mode == "strip":
+            try:
+                if member:
+                    dangerous = [r for r in member.roles if r.permissions.administrator or
+                                 r.permissions.ban_members or r.permissions.manage_guild or
+                                 r.permissions.manage_roles or r.permissions.manage_channels]
+                    for r in dangerous:
+                        try:
+                            await member.remove_roles(r, reason=f"[Empire Anti-Nuke] Role strip: {reason}")
+                        except:
+                            pass
+                    punishment_result = f"🎭 **ROLES STRIPPED** — {len(dangerous)} dangerous role(s) removed"
+                else:
+                    punishment_result = "<a:disabled1:1483344744024248453> Member not found for role strip"
+            except Exception as ex:
+                punishment_result = f"<a:disabled1:1483344744024248453> Strip failed: `{ex}`"
+
+    gid = guild.id
+    log_ch_id = ANTINUKE_LOG_CHANNEL.get(gid) or _get_guild_log(gid, "mod_log")
+    if log_ch_id:
+        ch = guild.get_channel(log_ch_id)
+        if ch:
+            action_icons = {
+                "ban":            "<a:ARedArrow:1483344139452940338>", "kick":           "👢",
+                "channel_delete": "💥", "channel_create": "🏗️",
+                "role_delete":    "🗑️", "role_create":    "⚠️",
+                "role_everyone":  "<a:crown:1483340832429051995>", "webhook_create": "🕸️",
+                "mass_mention":   "📢", "bot_add":        "🤖",
+            }
+            icon = action_icons.get(action, "⚠️")
+            e = discord.Embed(
+                title="<a:POLICE:1483344078547456091>  ANTI-NUKE TRIGGERED",
+                color=0xff0000,
+                timestamp=datetime.now(timezone.utc)
+            )
+            e.description = (
+                "```ansi\n"
+                "\u001b[1;31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "  ⚠  THREAT DETECTED & NEUTRALIZED  ⚠\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m\n"
+                "```"
+            )
+            e.add_field(
+                name=f"{icon}  Action Detected",
+                value=f"```fix\n{action.replace('_', ' ').upper()}\n```",
+                inline=True
+            )
+            e.add_field(
+                name="<a:antinuke:1483344748990435370>  Punishment",
+                value=punishment_result,
+                inline=True
+            )
+            e.add_field(name="\u200b", value="\u200b", inline=True)
+            e.add_field(
+                name="👤  Attacker",
+                value=f"{user_tag}\n`{user_str}`\n`ID: {user_id}`",
+                inline=True
+            )
+            e.add_field(
+                name="🏰  Server",
+                value=f"`{guild.name}`\n`{guild.member_count} members`",
+                inline=True
+            )
+            e.add_field(name="\u200b", value="\u200b", inline=True)
+            e.add_field(
+                name="📝  Reason",
+                value=f"```{reason}```",
+                inline=False
+            )
+            e.set_thumbnail(url=avatar_url)
+            e.set_image(url="https://i.imgur.com/0000000.png")  # placeholder, won't load
+            e.set_footer(
+                text=f"Empire Anti-Nuke  •  {guild.name}  •  Made by Black Belt",
+                icon_url=guild.me.display_avatar.url
+            )
+            try:
+                await ch.send(embed=e)
+            except:
+                pass
+
+async def _apply_automod_punishment(member: discord.Member, guild: discord.Guild, punishment: str, reason: str, feature: str = "spam") -> str:
+    """Apply automod punishment and return action string."""
+    try:
+        if punishment == "mute":
+            mins = _get_timeout_mins(guild.id, feature)
+            await member.timeout(timedelta(minutes=mins), reason=f"[Empire Automod] {reason}")
+            return f"Muted for {mins} minutes"
+        elif punishment == "kick":
+            await member.kick(reason=f"[Empire Automod] {reason}")
+            return "Kicked from server"
+        elif punishment == "ban":
+            await guild.ban(member, reason=f"[Empire Automod] {reason}", delete_message_days=0)
+            return "Banned from server"
+        else:  # delete only
+            return "Message Deleted"
+    except:
+        return "Message Deleted"
+
+async def send_automod_log(guild: discord.Guild, feature: str, member: discord.Member, action: str, channel, reason: str):
+    """Send Olympus-style automod log embed to the automod log channel."""
+    gid = guild.id
+    log_ch_id = AUTOMOD_LOG_CHANNEL.get(gid) or ANTINUKE_LOG_CHANNEL.get(gid) or _get_guild_log(gid, "mod_log")
+    if not log_ch_id:
+        return
+    ch = guild.get_channel(log_ch_id)
+    if not ch:
+        return
+    e = discord.Embed(
+        title=f"Automod Log: {feature}",
+        color=0xff0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.description = (
+        f"**User:** {member.mention} ( {member.id} )\n"
+        f"**Action:** {action}\n"
+        f"**Channel:** {channel.mention} ( {channel.id} )\n"
+        f"**Reason:** {reason}"
+    )
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    try:
+        await ch.send(embed=e)
+    except:
+        pass
+
+async def _send_antinuke_alert(guild: discord.Guild, title: str, desc: str, color=0xff6600):
+    """Send a warning-level anti-nuke alert."""
+    gid = guild.id
+    log_ch_id = ANTINUKE_LOG_CHANNEL.get(gid) or _get_guild_log(gid, "mod_log")
+    if log_ch_id:
+        ch = guild.get_channel(log_ch_id)
+        if ch:
+            e = discord.Embed(
+                title=f"⚠️  {title}",
+                description=f"```yaml\n{desc}\n```",
+                color=color,
+                timestamp=datetime.now(timezone.utc)
+            )
+            e.set_footer(
+                text=f"Empire Security  •  {guild.name}  •  Made by Black Belt",
+                icon_url=guild.me.display_avatar.url
+            )
+            try:
+                await ch.send(embed=e)
+            except:
+                pass
+
+# ─── Anti-Nuke Event Hooks ────────────────────────────────────────────────────
+
+@bot.event
+async def on_member_ban(guild, user):
+    await send_bot_log(guild, "<a:ARedArrow:1483344139452940338> Member Banned", f"**{user}**\nID: `{user.id}`", 0xed4245)
+
+    if not _is_antinuke_enabled(guild.id): return
+    # Fetch audit log to find who did it
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+            if _record_action(guild.id, actor_id, "ban"):
+                await _punish_nuker(guild, actor_id, "ban", f"Mass-banned members (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_member_remove(member):
+    guild = member.guild
+    # ── Send leave message ────────────────────────────────────────────────────
+    try:
+        lcfg = _get_welcome_cfg(guild.id, 'leave')
+        if lcfg.get('enabled') and int(lcfg.get('channel_id', 0)):
+            lch = guild.get_channel(int(lcfg['channel_id']))
+            if lch:
+                await lch.send(embed=_build_welcome_embed(lcfg, member, guild, 'leave'))
+    except Exception as _le:
+        print(f"[Welcome/Leave] Error: {_le}")
+
+    await send_bot_log(member.guild, "📤 Member Left", f"{member.mention} **{member}**\nID: `{member.id}`", 0xed4245)
+    guild = member.guild
+    gkey  = (guild.id, member.id)
+    iid   = member_inviter.get(gkey)
+    if iid:
+        data  = invite_tracker[guild.id][iid]
+        mtype = member_type.get(gkey, "real")
+        data["left"] += 1
+        if mtype == "real":
+            data["invites"] = max(0, data["invites"] - 1)
+
+    # Check for mass-kick via audit log
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+            if _record_action(guild.id, actor_id, "kick"):
+                await _punish_nuker(guild, actor_id, "kick", f"Mass-kicked members (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    guild = channel.guild
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+
+            # ── Immediate: system/important channel delete = turant punish ───
+            important_types = (discord.ChannelType.news, discord.ChannelType.forum)
+            is_system = (
+                channel.id == guild.rules_channel_id
+                or channel.id == guild.public_updates_channel_id
+                or channel.type in important_types
+            )
+            if is_system:
+                await _punish_nuker(
+                    guild, actor_id, "channel_delete",
+                    f"Deleted critical server channel: #{channel.name}"
+                )
+                return
+
+            # ── Threshold: mass channel deletion ─────────────────────────────
+            if _record_action(guild.id, actor_id, "channel_delete"):
+                await _punish_nuker(guild, actor_id, "channel_delete", "Mass-deleted channels (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_guild_channel_create(channel):
+    guild = channel.guild
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+            if _record_action(guild.id, actor_id, "channel_create"):
+                await _punish_nuker(guild, actor_id, "channel_create", f"Mass-created channels (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_guild_role_delete(role):
+    guild = role.guild
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+
+            # ── Immediate: high-value role delete = turant alert + punish ────
+            # Agar deleted role mein dangerous perms thi ya bohot saare members the
+            was_dangerous = any(getattr(role.permissions, p, False) for p in DANGEROUS_ROLE_PERMS)
+            if was_dangerous:
+                await _punish_nuker(
+                    guild, actor_id, "role_delete",
+                    f"Deleted high-privilege role with elevated permissions"
+                )
+                return
+
+            # ── Threshold: mass role deletion ────────────────────────────────
+            if _record_action(guild.id, actor_id, "role_delete"):
+                await _punish_nuker(guild, actor_id, "role_delete", "Mass-deleted roles (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_guild_role_create(role):
+    guild = role.guild
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_create):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+
+            # ── Immediate: ek bhi dangerous role create = turant punish ──────
+            is_dangerous = any(getattr(role.permissions, p, False) for p in DANGEROUS_ROLE_PERMS)
+            if is_dangerous:
+                try:
+                    await role.delete(reason="[Empire Anti-Nuke] Unauthorized dangerous role created")
+                except Exception:
+                    pass
+                await _punish_nuker(
+                    guild, actor_id, "role_create",
+                    f"Created dangerous role  with elevated permissions"
+                )
+                return  # Already punished, threshold skip karo
+
+            # ── Threshold: mass non-dangerous role creation ──────────────────
+            if _record_action(guild.id, actor_id, "role_create"):
+                await _punish_nuker(guild, actor_id, "role_create", "Mass-created roles (threshold exceeded)")
+    except:
+        pass
+
+@bot.event
+async def on_webhooks_update(channel):
+    guild = channel.guild
+    if not _is_antinuke_enabled(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
+            actor_id = entry.user.id
+            if _is_whitelisted(guild.id, actor_id): return
+            if _record_action(guild.id, actor_id, "webhook_create"):
+                await _punish_nuker(guild, actor_id, "webhook_create", f"Mass-created webhooks (threshold exceeded)")
+    except:
+        pass
+
+# ─── Dangerous Role Assign Detection ─────────────────────────────────────────
+# Agar koi non-whitelisted member kisi ko dangerous role assign kare → punish
+
+DANGEROUS_ROLE_PERMS = [
+    "administrator", "ban_members", "kick_members",
+    "manage_guild", "manage_roles", "manage_channels",
+    "manage_webhooks", "mention_everyone",
+    "manage_nicknames", "manage_expressions",
+]
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not message.guild:
+        await bot.process_commands(message)
+        return
+
+    guild = message.guild
+    user_id = message.author.id
+
+    # ── Command rate-limit guard ──────────────────────────────────────────────
+    curr_prefix = GUILD_PREFIXES.get(guild.id, "$")
+    if message.content.startswith(curr_prefix):
+        now = time.time()
+        hist = _cmd_rate[guild.id][user_id]
+        _cmd_rate[guild.id][user_id] = [t for t in hist if now - t < CMD_RATE_WIN]
+        _cmd_rate[guild.id][user_id].append(now)
+        if len(_cmd_rate[guild.id][user_id]) > CMD_RATE_MAX:
+            if user_id not in _blocked_users[guild.id]:
+                _blocked_users[guild.id].add(user_id)
+                try:
+                    # Command spam punishment: kick (ban if already kicked before)
+                    punishment_mode = ANTINUKE_PUNISHMENT.get(guild.id, "kick")
+                    action_str = "Kicked"
+                    if punishment_mode == "ban":
+                        await guild.ban(message.author, reason="[Empire Security] Command spam / rate limit abuse", delete_message_days=0)
+                        action_str = "Banned"
+                    else:
+                        await message.author.kick(reason="[Empire Security] Command spam / rate limit abuse")
+                        action_str = "Kicked"
+                    await message.channel.send(
+                        embed=discord.Embed(
+                            description=f"🚫 {message.author.mention} **Command spam detected!**\n**{action_str}** from server.",
+                            color=0xff0000
+                        ), delete_after=10
+                    )
+                except:
+                    pass
+                # Clear blocked after 5 min (in case kick failed)
+                async def _unblock(uid, gid):
+                    await asyncio.sleep(300)
+                    _blocked_users[gid].discard(uid)
+                asyncio.create_task(_unblock(user_id, guild.id))
+            return  # Don't process command
+
+    # ── Anti-Spam guard ────────────────────────────────────────────────────────
+    if DB.get_antispam(guild.id) and not _is_whitelisted(guild.id, user_id):
+        ANTISPAM_ENABLED[guild.id] = True
+        now = time.time()
+        sh = _spam_history[guild.id][user_id]
+        _spam_history[guild.id][user_id] = [t for t in sh if now - t < SPAM_MSG_WIN]
+        _spam_history[guild.id][user_id].append(now)
+        if len(_spam_history[guild.id][user_id]) >= SPAM_MSG_MAX:
+            _spam_history[guild.id][user_id].clear()
+            try:
+                p = AUTOMOD_PUNISHMENT.get(guild.id, {}).get("spam", "mute")
+                action_str = await _apply_automod_punishment(message.author, guild, p, "Message spam detected")
+                await message.channel.send(
+                    embed=discord.Embed(
+                        title="🚫 Anti-Spam Triggered",
+                        description=(
+                            f"{message.author.mention} **{action_str}** for spamming.\n"
+                            f"```diff\n- {SPAM_MSG_MAX} messages in {SPAM_MSG_WIN}s detected\n```"
+                        ),
+                        color=0xff0000,
+                        timestamp=datetime.now(timezone.utc)
+                    ).set_footer(text="Empire Anti-Spam • Made by Black Belt"),
+                    delete_after=10
+                )
+                asyncio.create_task(send_automod_log(guild, "Anti Spam", message.author, action_str, message.channel, "Spamming"))
+            except:
+                pass
+            return
+
+    # ── Automod checks ────────────────────────────────────────────────────────
+    if not _is_whitelisted(guild.id, user_id) and not _is_automod_whitelisted(guild, message.author):
+        am = _get_automod(guild.id)
+        txt = message.content
+
+        # Anti Caps
+        if am.get("caps") and len(txt) > 10:
+            alpha = sum(c.isalpha() for c in txt)
+            caps  = sum(c.isupper() for c in txt)
+            if alpha > 0 and (caps / alpha) >= _caps_threshold:
+                try:
+                    await message.delete()
+                    p = AUTOMOD_PUNISHMENT.get(guild.id, {}).get("caps", "mute")
+                    action_str = await _apply_automod_punishment(message.author, guild, p, "Excessive CAPS lock usage")
+                    await message.channel.send(
+                        embed=discord.Embed(description=f"🔠 {message.author.mention} No excessive CAPS! {action_str}", color=0xff6600),
+                        delete_after=5)
+                    asyncio.create_task(send_automod_log(guild, "Anti Caps", message.author, action_str, message.channel, "Excessive CAPS lock usage"))
+                except: pass
+
+        # Anti Discord Links (discord.gg / discord.com/invite)
+        if am.get("discord_links") and _invite_pattern.search(txt):
+            try:
+                await message.delete()
+                p = AUTOMOD_PUNISHMENT.get(guild.id, {}).get("discord_links", "mute")
+                action_str = await _apply_automod_punishment(message.author, guild, p, "Posted a Discord invite/link", "discord_links")
+                mins = _get_timeout_mins(guild.id, "discord_links")
+                warn_e = discord.Embed(
+                    title="🔗 Anti Discord Link",
+                    description=(
+                        f"{message.author.mention} **Discord links are not allowed!**\n"
+                        f"```diff\n- Action: {action_str}\n```"
+                    ),
+                    color=0xff0000,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                warn_e.set_footer(text="Empire Automod • Made by Black Belt")
+                await message.channel.send(embed=warn_e, delete_after=8)
+                asyncio.create_task(send_automod_log(guild, "Anti Discord Link", message.author, action_str, message.channel, "Posted a Discord invite link"))
+            except: pass
+
+        # Anti Invite Links (older feature kept)
+        elif am.get("invites") and _invite_pattern.search(txt):
+            try:
+                await message.delete()
+                p = AUTOMOD_PUNISHMENT.get(guild.id, {}).get("invites", "mute")
+                action_str = await _apply_automod_punishment(message.author, guild, p, "Posted a Discord invite", "invites")
+                await message.channel.send(
+                    embed=discord.Embed(description=f"🔗 {message.author.mention} Discord invites are not allowed! **{action_str}**", color=0xff6600),
+                    delete_after=8)
+                asyncio.create_task(send_automod_log(guild, "Anti Invites", message.author, action_str, message.channel, "Posted a Discord invite link"))
+            except: pass
+
+        # Anti Links (all URLs)
+        elif am.get("links") and _link_pattern.search(txt):
+            try:
+                await message.delete()
+                p = AUTOMOD_PUNISHMENT.get(guild.id, {}).get("links", "mute")
+                action_str = await _apply_automod_punishment(message.author, guild, p, "Posted a link", "links")
+                warn_e = discord.Embed(
+                    title="🔗 Anti Link",
+                    description=(
+                        f"{message.author.mention} **Links are not allowed!**\n"
+                        f"```diff\n- Action: {action_str}\n```"
+                    ),
+                    color=0xff0000,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                warn_e.set_footer(text="Empire Automod • Made by Black Belt")
+                await message.channel.send(embed=warn_e, delete_after=8)
+                asyncio.create_task(send_automod_log(guild, "Anti Link", message.author, action_str, message.channel, "Posted a link"))
+            except: pass
+
+        # Anti NSFW Links
+        if am.get("nsfw_links") and any(d in txt.lower() for d in _nsfw_domains):
+            try:
+                await message.delete()
+                await message.channel.send(
+                    embed=discord.Embed(description=f"🔞 {message.author.mention} NSFW links are not allowed!", color=0xff0000),
+                    delete_after=5)
+                asyncio.create_task(send_automod_log(guild, "Anti NSFW Link", message.author, "Message Deleted", message.channel, "Posted NSFW content"))
+            except: pass
+
+        # Anti Emoji Spam
+        if am.get("emoji_spam"):
+            import unicodedata
+            emoji_count = sum(1 for c in txt if unicodedata.category(c) in ('So', 'Sm')) + txt.count('<:') + txt.count('<a:')
+            if emoji_count >= _emoji_max:
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        embed=discord.Embed(description=f"😂 {message.author.mention} Too many emojis!", color=0xff6600),
+                        delete_after=5)
+                    asyncio.create_task(send_automod_log(guild, "Anti Emoji Spam", message.author, "Message Deleted", message.channel, f"Used {emoji_count} emojis in one message"))
+                except: pass
+
+        # Anti External Apps
+        if am.get("ext_apps") and _ext_app_pattern.search(txt):
+            try:
+                await message.delete()
+                await message.channel.send(
+                    embed=discord.Embed(description=f"🤖 {message.author.mention} External bot/app links are not allowed!", color=0xff6600),
+                    delete_after=5)
+                asyncio.create_task(send_automod_log(guild, "Anti External Apps", message.author, "Message Deleted", message.channel, "Posted an external bot/app link"))
+            except: pass
+
+        # Anti Token Spam (discord tokens)
+        if am.get("token_spam") and _token_pattern.search(txt):
+            try:
+                await message.delete()
+                await message.channel.send(
+                    embed=discord.Embed(description=f"🔑 {message.author.mention} Posting tokens is not allowed!", color=0xff0000),
+                    delete_after=5)
+                asyncio.create_task(send_automod_log(guild, "Anti Token Spam", message.author, "Message Deleted + Alert", message.channel, "Posted a potential Discord token"))
+                await _send_antinuke_alert(guild, "Token Detected",
+                    f"User: {message.author} ({user_id}) posted what looks like a Discord token!",
+                    color=0xff0000)
+            except: pass
+
+    # ── Mass mention guard (automod + antinuke) ──────────────────────────────
+    am_cfg = _get_automod(guild.id)
+    if am_cfg.get("mass_mention") and message.mention_everyone and not _is_whitelisted(guild.id, user_id):
+        try:
+            await message.delete()
+            await message.channel.send(
+                embed=discord.Embed(description=f"📢 {message.author.mention} Mass mentions are not allowed!", color=0xff0000),
+                delete_after=5)
+        except: pass
+
+    if _is_antinuke_enabled(guild.id):
+        if message.mention_everyone:
+            if _record_action(guild.id, user_id, "mass_mention"):
+                if not _is_whitelisted(guild.id, user_id):
+                    await _punish_nuker(guild, user_id, "mass_mention", "Spamming @everyone / @here")
+                    try:
+                        await message.delete()
+                    except:
+                        pass
+                    return
+
+    # ── AFK check ──────────────────────────────────────────────────────────────
+    uid = message.author.id
+    if uid in afk_map:
+        data = afk_map.pop(uid)
+        try:
+            member = message.guild.get_member(uid)
+            if member and member.nick and member.nick.startswith("[AFK] "):
+                await member.edit(nick=member.nick[6:])
+        except:
+            pass
+        afk_ago = time_ago(data["time"])
+        e = discord.Embed(
+            description=f"👋 Welcome back, {message.author.mention}! AFK removed.\n<a:clock:1483340836467900507> You were AFK for **{afk_ago}**",
+            color=C_AFK)
+        try:
+            msg = await message.reply(embed=e, mention_author=False)
+            await asyncio.sleep(5)
+            await msg.delete()
+        except:
+            pass
+
+    for mentioned in message.mentions:
+        if mentioned.id in afk_map:
+            data = afk_map[mentioned.id]
+            afk_since = time_ago(data["time"])
+            afk_reason = data["reason"]
+            e = discord.Embed(
+                description=f"💤 **{mentioned.display_name}** is AFK: {afk_reason}\n<a:clock:1483340836467900507> Since {afk_since}",
+                color=C_AFK
+            )
+            try:
+                await message.reply(embed=e, mention_author=False)
+            except:
+                pass
+
+    await bot.process_commands(message)
+
+# ─── Raid Shield: Monitor rapid joins ────────────────────────────────────────
+@bot.event
+async def on_member_join(member):
+    # ── INSTANT: Assign Unverified role — absolute first, zero delay ─────────
+    # NOTE: True 0-delay is achieved via $verify setup which sets @everyone
+    # view_channel=False on all channels. Role assign is as fast as Discord allows.
+    guild = member.guild
+    try:
+        cfg = _get_verify_cfg(guild.id)
+        unverified_role_id = cfg.get("unverified_role")
+        if not unverified_role_id:
+            r = discord.utils.get(guild.roles, name="Unverified")
+            if r:
+                cfg["unverified_role"] = r.id
+                unverified_role_id = r.id
+        if unverified_role_id:
+            unverified_role = guild.get_role(unverified_role_id)
+            if unverified_role:
+                await member.add_roles(unverified_role, reason="[Empire] Instant Unverified")
+    except:
+        pass
+
+    await send_bot_log(member.guild,
+        "📥 Member Joined",
+        f"{member.mention} **{member}**\nID: `{member.id}`\nAccount: <t:{int(member.created_at.timestamp())}:R>",
+        0x57f287)
+
+    guild = member.guild
+
+    # ── Raid Shield detection ─────────────────────────────────────────────────
+    if _raid_shield.get(guild.id):
+        now = time.time()
+        _join_times[guild.id] = [t for t in _join_times[guild.id] if now - t < RAID_JOIN_WIN]
+        _join_times[guild.id].append(now)
+
+        if len(_join_times[guild.id]) >= RAID_JOIN_COUNT:
+            # Activate lockdown
+            if not _lockdown_active.get(guild.id):
+                _lockdown_active[guild.id] = True
+                await _send_antinuke_alert(guild, "<a:POLICE:1483344078547456091> RAID DETECTED — Server Locked",
+                    f"**{len(_join_times[guild.id])} members joined in {RAID_JOIN_WIN}s!**\n"
+                    f"Server has been automatically locked down.\n"
+                    f"Use `$antinuke unlock` to restore access.", color=0xff0000)
+                # Lock all channels for @everyone
+                for ch in guild.text_channels:
+                    try:
+                        await ch.set_permissions(guild.default_role,
+                                                  send_messages=False,
+                                                  reason="[Empire Anti-Raid] Automatic lockdown")
+                    except:
+                        pass
+        # Kick new member if lockdown is active
+        if _lockdown_active.get(guild.id):
+            try:
+                await member.kick(reason="[Empire Anti-Raid] Server is in lockdown mode")
+            except:
+                pass
+            return
+
+    # ── Bot add detection ─────────────────────────────────────────────────────
+    if member.bot and _is_antinuke_enabled(guild.id):
+        try:
+            async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.bot_add):
+                actor_id = entry.user.id
+                if _is_whitelisted(guild.id, actor_id): pass
+                elif _record_action(guild.id, actor_id, "bot_add"):
+                    await _punish_nuker(guild, actor_id, "bot_add",
+                                        f"Unauthorized bot addition: {member} ({member.id})")
+                else:
+                    await _send_antinuke_alert(guild, "🤖 Unauthorized Bot Added",
+                        f"<@{actor_id}> added bot **{member}** (`{member.id}`).\n"
+                        f"If this was not authorized, remove the bot and revoke perms.")
+        except:
+            pass
+
+    # ── Existing invite tracking ──────────────────────────────────────────────
+    try:
+        new_invites = await guild.invites()
+        old_cache   = invite_cache.get(guild.id, {})
+        used_invite = None
+        for inv in new_invites:
+            if old_cache.get(inv.code, 0) < inv.uses:
+                used_invite = inv
+                break
+        invite_cache[guild.id] = {inv.code: inv.uses for inv in new_invites}
+
+        # ── Send join welcome embed (Carl-bot style: plain title + embed) ──────
+        try:
+            jcfg = _get_welcome_cfg(guild.id, 'join')
+            if jcfg.get('enabled') and int(jcfg.get('channel_id', 0)):
+                wch = guild.get_channel(int(jcfg['channel_id']))
+                if wch:
+                    # Build title text for plain message
+                    custom_title = str(jcfg.get('title', '') or '').strip()
+                    if custom_title:
+                        title_text = custom_title.replace('{mention}', member.mention).replace('{user}', str(member)).replace('{server}', guild.name)
+                    else:
+                        title_text = f"Welcome {member.mention}"
+                    # Send plain text title first, then embed (no title in embed)
+                    await wch.send(content=title_text, embed=_build_welcome_embed(jcfg, member, guild, 'join'))
+        except Exception as _we:
+            print(f"[Welcome/Join] Error: {_we}")
+
+        if used_invite and used_invite.inviter:
+            iid      = used_invite.inviter.id
+            gkey     = (guild.id, member.id)
+            data     = invite_tracker[guild.id][iid]
+            account_age_days = (datetime.now(timezone.utc) - member.created_at).days
+            is_fake   = (FAKE_DAYS > 0) and (account_age_days < FAKE_DAYS)
+            is_rejoin = gkey in member_inviter
+            if is_rejoin:
+                old_type = member_type.get(gkey, "real")
+                if old_type == "real":
+                    data["invites"] = max(0, data["invites"] - 1)
+                elif old_type == "fake":
+                    data["fake"]    = max(0, data["fake"] - 1)
+            if is_fake:
+                data["fake"]    += 1
+            elif is_rejoin:
+                data["rejoins"] += 1
+            else:
+                data["invites"] += 1
+            member_inviter[gkey] = iid
+            member_type[gkey]    = "fake" if is_fake else ("rejoin" if is_rejoin else "real")
+            _ilog = _get_guild_log(guild.id, "invite_log")
+            if _ilog:
+                ch = guild.get_channel(_ilog)
+                if ch:
+                    total    = data["invites"]
+                    joins    = data["invites"] + data["rejoins"] + data["fake"]
+                    inv_word = "invites" if total != 1 else "invite"
+                    e = discord.Embed(color=0x2b2d31)
+                    e.set_author(name="Invite log")
+                    e.set_thumbnail(url=used_invite.inviter.display_avatar.url)
+                    e.description = (
+                        f"\u25b6\u25b6 **{used_invite.inviter.display_name} has {total} {inv_word}**\n\n"
+                        f"**Joins :** {joins}\n"
+                        f"**Left :** {data['left']}\n"
+                        f"**Fake :** {data['fake']}\n"
+                        f"**Rejoins :** {data['rejoins']}"
+                    )
+                    e.set_footer(text=f"Joined: {member.display_name} \u2022 Today at {datetime.now().strftime('%H:%M')} \u2022 Made by Black Belt")
+                    await ch.send(embed=e)
+    except:
+        pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ANTI-NUKE COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.group(name="antinuke", aliases=["an"], invoke_without_command=True)
+@commands.has_permissions(administrator=True)
+async def antinuke_cmd(ctx):
+    """Anti-Nuke control panel."""
+    guild = ctx.guild
+    status       = "<a:enabled:1483344741675569325> **ENABLED**" if ANTINUKE_ENABLED.get(guild.id) else "<a:disabled1:1483344744024248453> **DISABLED**"
+    raid_status  = "<a:enabled:1483344741675569325> **ENABLED**" if _raid_shield.get(guild.id) else "<a:disabled1:1483344744024248453> **DISABLED**"
+    lock_status  = "<a:disabled1:1483344744024248453> **ACTIVE**"  if _lockdown_active.get(guild.id) else "<a:enabled:1483344741675569325> **Normal**"
+
+    wl_users = ANTINUKE_WHITELIST.get(guild.id, set())
+    wl_roles  = ANTINUKE_ROLE_WHITELIST.get(guild.id, set())
+    wl_u_str  = " ".join(f"<@{u}>"  for u in wl_users) if wl_users else "`None`"
+    wl_r_str  = " ".join(f"<@&{r}>" for r in wl_roles) if wl_roles else "`None`"
+
+    log_ch_id = ANTINUKE_LOG_CHANNEL.get(guild.id)
+    log_str   = f"<#{log_ch_id}>" if log_ch_id else "`Not set`"
+
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Empire Anti-Nuke Panel",
+        description=(
+            "Protect your server from nukes, raids, and malicious admins.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ),
+        color=0x5865f2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.add_field(name="<a:antinuke:1483344748990435370> Anti-Nuke",         value=status,      inline=True)
+    e.add_field(name="<a:POLICE:1483344078547456091> Raid Shield",        value=raid_status, inline=True)
+    e.add_field(name="🔒 Lockdown",           value=lock_status, inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Log Channel",        value=log_str,     inline=True)
+    e.add_field(name="<a:Tick:1483344124357644350> Whitelisted Users",  value=wl_u_str,    inline=False)
+    e.add_field(name="🎭 Whitelisted Roles",  value=wl_r_str,    inline=False)
+    e.add_field(
+        name="📖 User Whitelist",
+        value=(
+            "`$antinuke whitelist @user` — Whitelist a user\n"
+            "`$antinuke unwhitelist @user` — Remove user whitelist\n"
+            "`$antinuke wllist` — Show all whitelisted users & roles"
+        ),
+        inline=False
+    )
+    e.add_field(
+        name="🎭 Role Whitelist",
+        value=(
+            "`$antinuke wlrole @role` — Whitelist a role\n"
+            "`$antinuke unwlrole @role` — Remove role whitelist\n"
+            "`$antinuke wllist` — View full whitelist"
+        ),
+        inline=False
+    )
+    e.add_field(
+        name="⚙️ Other Commands",
+        value=(
+            "`$antinuke enable/disable` — Toggle anti-nuke\n"
+            "`$antinuke setlog #channel` — Set log channel\n"
+            "`$antinuke setpunish ban/kick/strip` — Set punishment mode\n"
+            "`$antinuke raid on/off` — Toggle raid shield\n"
+            "`$antinuke lock / unlock` — Manual lockdown\n"
+            "`$antinuke status` — Full status panel\n"
+            "`$antinuke thresholds` — View nuke limits\n"
+            "`$antinuke test` — Test alert (safe)\n"
+            "`$antispam on/off` — Toggle anti-spam\n"
+        ),
+        inline=False
+    )
+    e.set_footer(text="Empire Prime Security • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+@antinuke_cmd.command(name="enable")
+@commands.has_permissions(administrator=True)
+async def an_enable(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    prefix = GUILD_PREFIXES.get(guild.id, "$")
+
+    ENABLED_EVENTS = [
+        "Anti Ban", "Anti Kick", "Anti BotAdd",
+        "Anti Channel Create", "Anti Channel Delete", "Anti Channel Update",
+        "Anti @everyone / @here", "Anti Guild Update", "Anti Integration",
+        "Anti Member Update", "Anti Role Create", "Anti Role Delete",
+        "Anti Role Update", "Anti Webhook",
+    ]
+    SPECIAL_EVENTS = [
+        "Anti Prune", "Anti Link Role", "Safe Onboarding",
+        "Anti Member Update With Dangerous Permissions",
+        "Anti Role Update With Dangerous Permissions",
+    ]
+
+    # ── Step 1: Setup Progress Embed ─────────────────────────────────────────
+    setup_e = discord.Embed(
+        title="⚙️ Antinuke Setup",
+        description=(
+            "__**Performing Quick Checks To Ensure Everything Goes Smoothly During Setup**__\n\n"
+            "• Checking Bot's Role Permissions : ⏳\n"
+            "• Creating and Configuring Empire Firewall Role ⏳\n"
+            "• Creating Logging Channel For Antinuke Logs ⏳"
+        ),
+        color=0xff0000
+    )
+    setup_e.set_thumbnail(url=guild.me.display_avatar.url)
+    msg = await ctx.send(embed=setup_e)
+    await asyncio.sleep(1.2)
+
+    # Check 1: bot permissions
+    bot_perms = guild.me.guild_permissions
+    perm_ok = bot_perms.administrator or (bot_perms.ban_members and bot_perms.manage_roles and bot_perms.manage_channels)
+    await asyncio.sleep(0.8)
+
+    # Check 2: Create/find firewall role
+    firewall_role = discord.utils.get(guild.roles, name="Empire Firewall")
+    if not firewall_role:
+        try:
+            firewall_role = await guild.create_role(
+                name="Empire Firewall",
+                color=discord.Color.red(),
+                reason="Empire Anti-Nuke Firewall Role"
+            )
+            # Try to move it to top
+            try:
+                pos = max(r.position for r in guild.roles if r != guild.me.top_role) - 1
+                await firewall_role.edit(position=max(1, pos))
+            except: pass
+            role_ok = True
+        except:
+            role_ok = False
+    else:
+        role_ok = True
+    await asyncio.sleep(0.8)
+
+    # Check 3: Create/find antinuke log channel
+    log_ch = None
+    if not ANTINUKE_LOG_CHANNEL.get(guild.id):
+        existing = discord.utils.get(guild.text_channels, name="antinuke-logs")
+        if existing:
+            log_ch = existing
+        else:
+            try:
+                # Try to put it in a category named "Logs" or "logs"
+                cat = discord.utils.get(guild.categories, name="Logs") or discord.utils.get(guild.categories, name="logs")
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                }
+                log_ch = await guild.create_text_channel(
+                    "antinuke-logs",
+                    category=cat,
+                    overwrites=overwrites,
+                    topic="Empire Anti-Nuke alert logs",
+                    reason="Empire Anti-Nuke log channel"
+                )
+            except:
+                log_ch = None
+        if log_ch:
+            ANTINUKE_LOG_CHANNEL[guild.id] = log_ch.id
+        ch_ok = log_ch is not None
+    else:
+        ch_ok = True
+        log_ch = guild.get_channel(ANTINUKE_LOG_CHANNEL[guild.id])
+
+    # Update setup embed with results
+    setup_e2 = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Antinuke Setup",
+        description=(
+            "__**Performing Quick Checks To Ensure Everything Goes Smoothly During Setup**__\n\n"
+            f"• Checking Bot's Role Permissions : {'<a:Tick:1483344124357644350>' if perm_ok else '⚠️'}\n"
+            f"• Creating and Configuring Empire Firewall Role {'<a:Tick:1483344124357644350>' if role_ok else '⚠️ (create manually)'}\n"
+            f"• Creating Logging Channel For Antinuke Logs {'<a:Tick:1483344124357644350>' if ch_ok else '⚠️ (set with ' + prefix + 'antinuke setlog)'}"
+        ),
+        color=0xff0000
+    )
+    setup_e2.set_thumbnail(url=guild.me.display_avatar.url)
+    await msg.edit(embed=setup_e2)
+    await asyncio.sleep(1.5)
+
+    # ── Step 2: Enable and show enabled events ────────────────────────────────
+    ANTINUKE_ENABLED[guild.id] = True
+    DB.set_antinuke(guild.id, enabled=1)
+
+    enabled_lines = "\n".join(f"<a:Tick:1483344124357644350> {ev}" for ev in ENABLED_EVENTS)
+    special_lines = "\n".join(f"<a:Tick:1483344124357644350> {ev}" for ev in SPECIAL_EVENTS)
+
+    e = discord.Embed(color=0x2b2d31)
+    e.description = (
+        f"<a:Tick:1483344124357644350>  **Enabled Antinuke in this Guild**\n\n"
+        f"**• Enabled Events:**\n{enabled_lines}\n\n"
+        f"**• Special Events**\n{special_lines}\n\n"
+        f"Place **{guild.me.display_name}** role above all roles to prevent any unauthorised actions."
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+    # ── Step 3: Log channel welcome message ───────────────────────────────────
+    if log_ch:
+        welcome = discord.Embed(
+            title="<a:antinuke:1483344748990435370> Empire Anti-Nuke Active",
+            description=(
+                f"Anti-Nuke has been **enabled** in **{guild.name}**!\n\n"
+                f"All suspicious actions will be logged here.\n"
+                f"Enabled by: {ctx.author.mention}"
+            ),
+            color=0xff0000,
+            timestamp=datetime.now(timezone.utc)
+        )
+        welcome.set_thumbnail(url=guild.me.display_avatar.url)
+        welcome.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+        try:
+            await log_ch.send(embed=welcome)
+        except: pass
+
+
+@bot.tree.command(name="antinuke-enable", description="Enable the Anti-Nuke protection system")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_an_enable(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    guild = interaction.guild
+    ANTINUKE_ENABLED[guild.id] = True
+    DB.set_antinuke(guild.id, enabled=1)
+    ENABLED_EVENTS = [
+        "Anti Ban", "Anti Kick", "Anti BotAdd",
+        "Anti Channel Create", "Anti Channel Delete", "Anti Channel Update",
+        "Anti @everyone / @here", "Anti Guild Update", "Anti Integration",
+        "Anti Member Update", "Anti Role Create", "Anti Role Delete",
+        "Anti Role Update", "Anti Webhook",
+    ]
+    SPECIAL_EVENTS = [
+        "Anti Prune", "Anti Link Role", "Safe Onboarding",
+        "Anti Member Update With Dangerous Permissions",
+        "Anti Role Update With Dangerous Permissions",
+    ]
+    enabled_lines = "\n".join(f"<a:Tick:1483344124357644350> {ev}" for ev in ENABLED_EVENTS)
+    special_lines = "\n".join(f"<a:Tick:1483344124357644350> {ev}" for ev in SPECIAL_EVENTS)
+    e = discord.Embed(color=0x2b2d31)
+    e.description = (
+        f"\u2705  **Enabled Antinuke in this Guild**\n\n"
+        f"**\u2022 Enabled Events:**\n{enabled_lines}\n\n"
+        f"**\u2022 Special Events**\n{special_lines}\n\n"
+        f"Place **{guild.me.display_name}** role above all roles to prevent any unauthorised actions."
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development\u2122", icon_url=guild.me.display_avatar.url)
+    await interaction.response.send_message(embed=e)
+
+
+
+@antinuke_cmd.command(name="disable")
+@commands.has_permissions(administrator=True)
+async def an_disable(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    ANTINUKE_ENABLED[guild.id] = False
+    DB.set_antinuke(guild.id, enabled=0)
+
+    class ConfirmDisableView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=20)
+
+        @discord.ui.button(label="⚠️  Yes, Disable", style=discord.ButtonStyle.danger)
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can click this."), ephemeral=True)
+            for child in self.children:
+                child.disabled = True
+            done = discord.Embed(
+                title="<a:disabled1:1483344744024248453>  Anti-Nuke DISABLED",
+                description=(
+                    "```diff\n- PROTECTION IS NOW OFF\n```\n"
+                    f"> Your server is **no longer protected**.\n"
+                    f"> Disabled by: {ctx.author.mention}\n\n"
+                    "Use `$antinuke enable` to re-enable protection."
+                ),
+                color=0xff0000,
+                timestamp=datetime.now(timezone.utc)
+            )
+            done.set_footer(text="Empire Prime Anti-Nuke • Made by Black Belt",
+                            icon_url=guild.me.display_avatar.url)
+            await interaction.response.edit_message(embed=done, view=self)
+            self.stop()
+
+        @discord.ui.button(label="✅  Keep Enabled", style=discord.ButtonStyle.success)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can click this."), ephemeral=True)
+            ANTINUKE_ENABLED[guild.id] = True
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                embed=ok_embed("<a:Tick:1483344124357644350> Anti-Nuke remains **ENABLED**. Smart choice!"), view=self)
+            self.stop()
+
+    e = discord.Embed(
+        title="⚠️  Disable Anti-Nuke?",
+        description=(
+            "```diff\n- WARNING: This will remove all server protection!\n```\n"
+            "> Are you sure you want to **disable Anti-Nuke**?\n"
+            "> Your server will be **unprotected** from nukers & raids."
+        ),
+        color=0xfee75c,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text="Empire Prime Security • Made by Black Belt",
+                 icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e, view=ConfirmDisableView())
+
+@antinuke_cmd.command(name="setpunish")
+@commands.has_permissions(administrator=True)
+async def an_setpunish(ctx, mode: str = None):
+    """Set punishment mode: ban | kick | strip"""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    valid = ("ban", "kick", "strip")
+    if not mode or mode.lower() not in valid:
+        curr = ANTINUKE_PUNISHMENT.get(ctx.guild.id, "ban")
+        e = discord.Embed(
+            title="⚙️ Anti-Nuke Punishment Mode",
+            description=(
+                f"**Current Mode:** `{curr.upper()}`\n\n"
+                "Choose what happens when a nuke is detected:\n\n"
+                "<a:ARedArrow:1483344139452940338> `ban` — Permanently ban the attacker *(default, strongest)*\n"
+                "👢 `kick` — Kick the attacker (can rejoin)\n"
+                "🎭 `strip` — Remove all dangerous roles only\n\n"
+                "Usage: `$antinuke setpunish ban/kick/strip`"
+            ),
+            color=0x5865f2
+        )
+        e.set_footer(text="Empire Prime Security • Made by Black Belt")
+        return await ctx.send(embed=e)
+
+    mode = mode.lower()
+    ANTINUKE_PUNISHMENT[ctx.guild.id] = mode
+    DB.set_antinuke(ctx.guild.id, punishment=mode)
+    icons = {"ban": "<a:ARedArrow:1483344139452940338>", "kick": "👢", "strip": "🎭"}
+    descs = {
+        "ban":   "Attackers will be **permanently banned**.",
+        "kick":  "Attackers will be **kicked** from the server.",
+        "strip": "Attackers will have all **dangerous roles removed**."
+    }
+    await ctx.send(embed=ok_embed(
+        f"{icons[mode]} **Punishment mode set to `{mode.upper()}`**\n{descs[mode]}"
+    ))
+
+@bot.command(name="antispam")
+@commands.has_permissions(administrator=True)
+async def antispam_cmd(ctx, toggle: str = None):
+    """Toggle anti-spam protection: on | off"""
+    if not toggle:
+        status = "<a:enabled:1483344741675569325> ENABLED" if ANTISPAM_ENABLED.get(ctx.guild.id) else "<a:disabled1:1483344744024248453> DISABLED"
+        e = discord.Embed(
+            title="🚫 Anti-Spam Status",
+            description=(
+                f"**Current:** {status}\n\n"
+                f"Triggers when a user sends **{SPAM_MSG_MAX}+ messages in {SPAM_MSG_WIN}s**.\n"
+                f"Punishment: **{SPAM_TIMEOUT_MINS}-minute timeout**\n\n"
+                "Usage: `$antispam on/off`"
+            ),
+            color=0x5865f2
+        )
+        e.set_footer(text="Empire Prime Security • Made by Black Belt")
+        return await ctx.send(embed=e)
+
+    if toggle.lower() in ("on", "enable", "1"):
+        ANTISPAM_ENABLED[ctx.guild.id] = True
+        DB.set_antispam(ctx.guild.id, True)
+        await ctx.send(embed=ok_embed(
+            f"🚫 **Anti-Spam ENABLED!**\n"
+            f"Users sending **{SPAM_MSG_MAX}+ messages in {SPAM_MSG_WIN}s** will be timed out for **{SPAM_TIMEOUT_MINS} minutes**."
+        ))
+    else:
+        ANTISPAM_ENABLED[ctx.guild.id] = False
+        DB.set_antispam(ctx.guild.id, False)
+        await ctx.send(embed=err_embed("🚫 Anti-Spam disabled."))
+
+@antinuke_cmd.command(name="whitelist")
+@commands.has_permissions(administrator=True)
+async def an_whitelist(ctx, user: discord.Member = None):
+    guild = ctx.guild
+    gid = guild.id
+
+    # No user given — show whitelist list
+    if user is None:
+        wl = ANTINUKE_WHITELIST.get(gid, set())
+        if not wl:
+            return await ctx.send(embed=info_embed("\u2705 Whitelist", "No users whitelisted.\nUse `$antinuke whitelist @user` to add."))
+        desc = "\n".join(f"\u2022 <@{uid}> (`{uid}`)" for uid in wl)
+        return await ctx.send(embed=info_embed("\u2705 Anti-Nuke Whitelist", desc))
+
+    if user.id == guild.owner_id:
+        return await ctx.send(embed=ok_embed("Server owner is always whitelisted!"))
+
+    # ── Olympus-style whitelist embed ─────────────────────────────────────
+    ALL_AN_EVENTS = [
+        ("ban",             ":Ban"),
+        ("kick",            ":Kick"),
+        ("prune",           ":Prune Members"),
+        ("bot_add",         ":Bot Add"),
+        ("guild_update",    ":Guild Update"),
+        ("channel_create",  ":Channel Create"),
+        ("channel_delete",  ":Channel Delete"),
+        ("channel_update",  ":Channel Update"),
+        ("role_create",     ":Role Create"),
+        ("role_delete",     ":Role Delete"),
+        ("role_update",     ":Role Update"),
+        ("role_everyone",   ":Role Update With Dangerous Permissions"),
+        ("mass_mention",    ":Mention @everyone"),
+        ("webhook_create",  ":Webhook Create"),
+        ("webhook_update",  ":Webhook Update"),
+        ("webhook_delete",  ":Webhook Delete"),
+        ("member_update",   ":Member Update"),
+        ("member_dangerous",":Member Update With Dangerous Permissions"),
+        ("integration",     ":Anti Integration (Re-Adding Bot)"),
+        ("sticker",         ":Anti Sticker Update"),
+        ("emoji",           ":Anti Emoji Update"),
+    ]
+
+    # Get per-event whitelist for this user (default: all events blocked)
+    user_wl_events = ANTINUKE_EVENT_WHITELIST[gid].get(user.id, set())
+    all_wled = len(user_wl_events) == 0  # empty set = not whitelisted for any event specifically = whitelist all
+
+    # Build events list — red X for not-whitelisted, green check if whitelisted
+    _T = "<a:Tick:1483344124357644350>"
+    _R = "<a:disabled1:1483344744024248453>"
+    event_lines = "\n".join(
+        (_T if (key in user_wl_events or user.id in ANTINUKE_WHITELIST[gid]) else _R) + " " + label
+        for key, label in ALL_AN_EVENTS
+    )
+
+    e = discord.Embed(color=0x2b2d31)
+    e.description = f"**{user.display_name.upper()}**\n\n{event_lines}"
+    e.set_thumbnail(url=user.display_avatar.url)
+    e.add_field(name="\U0001f9d1 Author", value=f"@{ctx.author.name}", inline=True)
+    e.add_field(name="\U0001f3af Target", value=f"@{user.name}", inline=True)
+    e.set_footer(text="Powered by Empire Development\u2122")
+
+    # Dropdown to whitelist specific events
+    event_options = [
+        discord.SelectOption(label=label.lstrip(":"), value=key)
+        for key, label in ALL_AN_EVENTS
+    ]
+    # Add "All Events" option at top
+    event_options.insert(0, discord.SelectOption(label="All Events", value="__all__", description="Whitelist for every event"))
+
+    class WhitelistView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.select(
+            placeholder="Choose a category",
+            min_values=1,
+            max_values=1,
+            options=event_options[:25]
+        )
+        async def event_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can use this."), ephemeral=True)
+            chosen_key = select.values[0]
+            if chosen_key == "__all__":
+                ANTINUKE_WHITELIST[gid].add(user.id)
+                DB.wl_add_user(gid, user.id)
+                ANTINUKE_EVENT_WHITELIST[gid][user.id] = {k for k, _ in ALL_AN_EVENTS}
+                DB.ev_wl_save(gid, user.id, ANTINUKE_EVENT_WHITELIST[gid][user.id])
+                wled = {k for k, _ in ALL_AN_EVENTS}
+            else:
+                ANTINUKE_EVENT_WHITELIST[gid].setdefault(user.id, set()).add(chosen_key)
+                wled = ANTINUKE_EVENT_WHITELIST[gid][user.id]
+            # Rebuild embed showing green for whitelisted events
+            _T = "<a:Tick:1483344124357644350>"
+            _R = "<a:disabled1:1483344744024248453>"
+            new_lines = "\n".join(
+                (_T if (k in wled or user.id in ANTINUKE_WHITELIST[gid]) else _R) + " " + lbl
+                for k, lbl in ALL_AN_EVENTS
+            )
+            new_e = discord.Embed(color=0x2b2d31)
+            new_e.description = f"**{user.display_name.upper()}**\n\n{new_lines}"
+            new_e.set_thumbnail(url=user.display_avatar.url)
+            new_e.add_field(name="\U0001f9d1 Author", value=f"@{ctx.author.name}", inline=True)
+            new_e.add_field(name="\U0001f3af Target", value=f"@{user.name}", inline=True)
+            new_e.set_footer(text="Powered by Empire Development\u2122")
+            await interaction.response.edit_message(embed=new_e, view=self)
+
+        @discord.ui.button(label="Whitelist All Event", style=discord.ButtonStyle.danger, emoji="\U0001f6e1\ufe0f", row=2)
+        async def whitelist_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can use this."), ephemeral=True)
+            ANTINUKE_WHITELIST[gid].add(user.id)
+            DB.wl_add_user(gid, user.id)
+            ANTINUKE_EVENT_WHITELIST[gid][user.id] = {k for k, _ in ALL_AN_EVENTS}
+            DB.ev_wl_save(gid, user.id, ANTINUKE_EVENT_WHITELIST[gid][user.id])
+            for child in self.children:
+                child.disabled = True
+            # Rebuild embed with all green
+            new_lines = "\n".join("<a:Tick:1483344124357644350> " + label for _, label in ALL_AN_EVENTS)
+            new_e = discord.Embed(color=0x2b2d31)
+            new_e.description = f"**{user.display_name.upper()}**\n\n{new_lines}"
+            new_e.set_thumbnail(url=user.display_avatar.url)
+            new_e.add_field(name="\U0001f9d1 Author", value=f"@{ctx.author.name}", inline=True)
+            new_e.add_field(name="\U0001f3af Target", value=f"@{user.name}", inline=True)
+            new_e.set_footer(text="Powered by Empire Development\u2122")
+            await interaction.response.edit_message(embed=new_e, view=self)
+
+    await ctx.send(embed=e, view=WhitelistView())
+
+
+@antinuke_cmd.command(name="unwhitelist")
+@commands.has_permissions(administrator=True)
+async def an_unwhitelist(ctx, user: discord.Member):
+    ANTINUKE_WHITELIST[ctx.guild.id].discard(user.id)
+    DB.wl_remove_user(ctx.guild.id, user.id)
+    await ctx.send(embed=ok_embed(f"🗑️ {user.mention} removed from Anti-Nuke user whitelist."))
+
+@antinuke_cmd.command(name="wlrole")
+@commands.has_permissions(administrator=True)
+async def an_wlrole(ctx, role: discord.Role):
+    """Whitelist an entire role — all members with this role bypass anti-nuke."""
+    if role.permissions.administrator and role != ctx.guild.owner_role:
+        # Warn but still allow
+        pass
+    ANTINUKE_ROLE_WHITELIST[ctx.guild.id].add(role.id)
+    DB.wl_add_role(ctx.guild.id, role.id)
+    await ctx.send(embed=ok_embed(
+        f"🎭 Role {role.mention} added to Anti-Nuke whitelist.\n"
+        f"**All members with this role** will bypass anti-nuke checks.\n"
+        f"⚠️ Make sure this role is only given to **trusted staff**!"
+    ))
+
+@antinuke_cmd.command(name="unwlrole")
+@commands.has_permissions(administrator=True)
+async def an_unwlrole(ctx, role: discord.Role):
+    """Remove a role from the anti-nuke whitelist."""
+    ANTINUKE_ROLE_WHITELIST[ctx.guild.id].discard(role.id)
+    DB.wl_remove_role(ctx.guild.id, role.id)
+    await ctx.send(embed=ok_embed(f"🗑️ Role {role.mention} removed from Anti-Nuke role whitelist."))
+
+@antinuke_cmd.command(name="wllist")
+@commands.has_permissions(administrator=True)
+async def an_wllist(ctx):
+    """Show full whitelist — users and roles."""
+    guild = ctx.guild
+    wl_users = ANTINUKE_WHITELIST.get(guild.id, set())
+    wl_roles  = ANTINUKE_ROLE_WHITELIST.get(guild.id, set())
+
+    e = discord.Embed(
+        title="<a:Tick:1483344124357644350> Anti-Nuke Whitelist",
+        description="These users/roles bypass all anti-nuke protection.",
+        color=0x57f287,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    # Users
+    if wl_users:
+        u_lines = []
+        for uid in wl_users:
+            member = guild.get_member(uid)
+            name = str(member) if member else f"Unknown ({uid})"
+            u_lines.append(f"▸ <@{uid}> — `{name}`")
+        e.add_field(name=f"👤 Whitelisted Users ({len(wl_users)})",
+                    value="\n".join(u_lines[:20]), inline=False)
+    else:
+        e.add_field(name="👤 Whitelisted Users", value="`None`", inline=False)
+
+    # Roles
+    if wl_roles:
+        r_lines = []
+        for rid in wl_roles:
+            role = guild.get_role(rid)
+            name = role.name if role else f"Deleted Role ({rid})"
+            member_count = len(role.members) if role else 0
+            r_lines.append(f"▸ <@&{rid}> — `{name}` ({member_count} members)")
+        e.add_field(name=f"🎭 Whitelisted Roles ({len(wl_roles)})",
+                    value="\n".join(r_lines[:20]), inline=False)
+    else:
+        e.add_field(name="🎭 Whitelisted Roles", value="`None`", inline=False)
+
+    # Always whitelisted
+    owner = guild.owner
+    e.add_field(name="<a:crown:1483340832429051995> Always Whitelisted",
+                value=f"▸ {owner.mention} — Server Owner (automatic)",
+                inline=False)
+
+    e.set_footer(text=f"Empire Security • {len(wl_users)} users, {len(wl_roles)} roles • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@antinuke_cmd.command(name="setlog")
+@commands.has_permissions(administrator=True)
+async def an_setlog(ctx, channel: discord.TextChannel = None):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    ch = channel or ctx.channel
+    ANTINUKE_LOG_CHANNEL[ctx.guild.id] = ch.id
+    DB.set_antinuke(ctx.guild.id, log_channel=ch.id)
+    await ctx.send(embed=ok_embed(f"<a:Moderation:1483344127071486123> Anti-Nuke alerts will be sent to {ch.mention}"))
+
+@antinuke_cmd.command(name="raid")
+@commands.has_permissions(administrator=True)
+async def an_raid(ctx, toggle: str = "on"):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    gid = ctx.guild.id
+    if toggle.lower() in ("on", "enable", "1"):
+        _raid_shield[gid] = True
+        DB.set_antinuke(gid, raid_shield=1)
+        await ctx.send(embed=ok_embed(
+            f"<a:POLICE:1483344078547456091> **Raid Shield ENABLED!**\n"
+            f"If **{RAID_JOIN_COUNT}+ members** join within **{RAID_JOIN_WIN}s**, the server will auto-lockdown."
+        ))
+    else:
+        _raid_shield[gid] = False
+        DB.set_antinuke(gid, raid_shield=0)
+        await ctx.send(embed=err_embed("<a:POLICE:1483344078547456091> Raid Shield disabled."))
+
+@antinuke_cmd.command(name="lock")
+@commands.has_permissions(administrator=True)
+async def an_lock(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    _lockdown_active[guild.id] = True
+    locked = 0
+    for ch in guild.text_channels:
+        try:
+            await ch.set_permissions(guild.default_role, send_messages=False,
+                                      reason=f"[Anti-Nuke] Manual lockdown by {ctx.author}")
+            locked += 1
+        except:
+            pass
+    e = discord.Embed(
+        title="🔒 SERVER LOCKED DOWN",
+        description=(
+            f"**{locked} channels** have been locked.\n"
+            f"Members cannot send messages until the lockdown is lifted.\n\n"
+            f"Use `$antinuke unlock` to restore access."
+        ),
+        color=0xff0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text=f"Locked by {ctx.author} • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@antinuke_cmd.command(name="unlock")
+@commands.has_permissions(administrator=True)
+async def an_unlock(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    _lockdown_active[guild.id] = False
+    _join_times[guild.id].clear()
+    unlocked = 0
+    for ch in guild.text_channels:
+        try:
+            await ch.set_permissions(guild.default_role, send_messages=None,
+                                      reason=f"[Anti-Nuke] Lockdown lifted by {ctx.author}")
+            unlocked += 1
+        except:
+            pass
+    await ctx.send(embed=ok_embed(
+        f"🔓 **Lockdown lifted!** {unlocked} channels restored.\n"
+        f"Server is back to normal."
+    ))
+
+@antinuke_cmd.command(name="status")
+@commands.has_permissions(administrator=True)
+async def an_status(ctx):
+    guild = ctx.guild
+    gid = guild.id
+
+    status       = "<a:enabled:1483344741675569325> ENABLED"  if ANTINUKE_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    raid_status  = "<a:enabled:1483344741675569325> ENABLED"  if _raid_shield.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    lock_status  = "<a:disabled1:1483344744024248453> ACTIVE"   if _lockdown_active.get(gid) else "<a:enabled:1483344741675569325> Normal"
+    spam_status  = "<a:enabled:1483344741675569325> ENABLED"  if ANTISPAM_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    blocked_cnt  = len(_blocked_users[gid])
+    punished_cnt = len(_nuked_punished[gid])
+    wl_cnt       = len(ANTINUKE_WHITELIST[gid])
+    log_ch_id    = ANTINUKE_LOG_CHANNEL.get(gid)
+    log_str      = f"<#{log_ch_id}>" if log_ch_id else "Not set"
+    punish_mode  = ANTINUKE_PUNISHMENT.get(gid, "ban").upper()
+    punish_icons = {"BAN": "<a:ARedArrow:1483344139452940338>", "KICK": "👢", "STRIP": "🎭"}
+    punish_str   = f"{punish_icons.get(punish_mode, '<a:antinuke:1483344748990435370>')} `{punish_mode}`"
+
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Anti-Nuke Full Status",
+        description="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        color=0x00ff88,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.add_field(name="<a:antinuke:1483344748990435370> Anti-Nuke",          value=status,           inline=True)
+    e.add_field(name="<a:POLICE:1483344078547456091> Raid Shield",         value=raid_status,      inline=True)
+    e.add_field(name="🔒 Lockdown",            value=lock_status,      inline=True)
+    e.add_field(name="🚫 Anti-Spam",           value=spam_status,      inline=True)
+    e.add_field(name="⚙️ Punishment Mode",     value=punish_str,       inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Log Channel",         value=log_str,          inline=True)
+    e.add_field(name="<a:Tick:1483344124357644350> Whitelisted Users",   value=str(wl_cnt),      inline=True)
+    e.add_field(name="🚫 Rate-limited Users",  value=str(blocked_cnt), inline=True)
+    e.add_field(name="<a:ARedArrow:1483344139452940338> Nukers Punished",     value=str(punished_cnt),inline=True)
+    e.add_field(name="📊 Join Rate (recent)",  value=f"{len(_join_times[gid])} in last {RAID_JOIN_WIN}s", inline=True)
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text=f"Empire Security • {guild.name} • Made by Black Belt",
+                 icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+@antinuke_cmd.command(name="thresholds")
+@commands.has_permissions(administrator=True)
+async def an_thresholds(ctx):
+    lines = "\n".join(
+        f"▸ `{k}` — **{v[0]}** actions in **{v[1]}s**"
+        for k, v in NUKE_THRESHOLDS.items()
+    )
+    e = discord.Embed(
+        title="📊 Anti-Nuke Thresholds",
+        description=f"Actions that trigger auto-ban:\n\n{lines}",
+        color=0x5865f2
+    )
+    e.set_footer(text="Empire Prime Security • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@antinuke_cmd.command(name="test")
+@commands.has_permissions(administrator=True)
+async def an_test(ctx):
+    gid = ctx.guild.id
+    log_ch_id = ANTINUKE_LOG_CHANNEL.get(gid) or _get_guild_log(gid, "mod_log")
+    log_str = f"<#{log_ch_id}>" if log_ch_id else "`Not set — use $antinuke setlog #channel`"
+    punish_mode = ANTINUKE_PUNISHMENT.get(gid, "ban").upper()
+
+    e = discord.Embed(
+        title="🧪  ANTI-NUKE TEST ALERT",
+        color=0x00ff88,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.description = (
+        "```ansi\n"
+        "\u001b[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "       <a:Tick:1483344124357644350>  ALL SYSTEMS OPERATIONAL\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m\n"
+        "```"
+    )
+    e.add_field(name="<a:antinuke:1483344748990435370> Anti-Nuke",     value="<a:enabled:1483344741675569325> Active" if ANTINUKE_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> Disabled", inline=True)
+    e.add_field(name="<a:POLICE:1483344078547456091> Raid Shield",   value="<a:enabled:1483344741675569325> Active" if _raid_shield.get(gid) else "<a:disabled1:1483344744024248453> Disabled",     inline=True)
+    e.add_field(name="🚫 Anti-Spam",     value="<a:enabled:1483344741675569325> Active" if ANTISPAM_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> Disabled",  inline=True)
+    e.add_field(name="⚙️ Punishment",    value=f"`{punish_mode}`",                                           inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Log Channel",   value=log_str,                                                       inline=True)
+    e.add_field(name="👤 Triggered by",  value=ctx.author.mention,                                            inline=True)
+    wl_u = len(ANTINUKE_WHITELIST.get(gid, set()))
+    wl_r = len(ANTINUKE_ROLE_WHITELIST.get(gid, set()))
+    e.add_field(name="<a:Tick:1483344124357644350> Whitelist",     value=f"{wl_u} users • {wl_r} roles",                               inline=True)
+    e.set_thumbnail(url=ctx.guild.me.display_avatar.url)
+    e.set_footer(
+        text=f"Empire Anti-Nuke  •  {ctx.guild.name}  •  Made by Black Belt",
+        icon_url=ctx.guild.me.display_avatar.url
+    )
+
+    if log_ch_id:
+        ch = ctx.guild.get_channel(log_ch_id)
+        if ch:
+            await ch.send(embed=e)
+            await ctx.send(embed=ok_embed(f"<a:Tick:1483344124357644350> Test alert sent to {ch.mention}!"))
+            return
+    await ctx.send(embed=e)
+    await ctx.send(embed=discord.Embed(
+        description="⚠️ **No log channel set!** Use `$antinuke setlog #channel` or `$setuplogs`",
+        color=0xfee75c), delete_after=10)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SECURITY COMMANDS  ($security)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.group(name="security", aliases=["sec"], invoke_without_command=True)
+@commands.has_permissions(administrator=True)
+async def security_cmd(ctx):
+    """Security utilities panel."""
+    e = discord.Embed(
+        title="🔐 Empire Security Panel",
+        description="Advanced server protection tools.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        color=0x5865f2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.add_field(
+        name="🔍 Audit",
+        value=(
+            "`$security audit` — Recent suspicious actions\n"
+            "`$security bots` — List all bots in server\n"
+            "`$security admins` — List all admins/high perms\n"
+            "`$security newmembers [days]` — Recent joiners"
+        ), inline=False
+    )
+    e.add_field(
+        name="<a:antinuke:1483344748990435370> Protection",
+        value=(
+            "`$security clearblocked` — Unblock rate-limited users\n"
+            "`$security resetpunished` — Reset punished list (this session)\n"
+            "`$security checkreps` — Check for suspicious roles"
+        ), inline=False
+    )
+    e.set_footer(text="Empire Prime Security • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@security_cmd.command(name="audit")
+@commands.has_permissions(administrator=True)
+async def sec_audit(ctx):
+    guild = ctx.guild
+    lines = []
+    try:
+        actions = [
+            discord.AuditLogAction.ban,
+            discord.AuditLogAction.kick,
+            discord.AuditLogAction.channel_delete,
+            discord.AuditLogAction.role_delete,
+        ]
+        for action in actions:
+            async for entry in guild.audit_logs(limit=3, action=action):
+                ts = int(entry.created_at.timestamp())
+                lines.append(f"▸ `{entry.action.name}` by <@{entry.user.id}> — <t:{ts}:R>")
+    except:
+        lines.append("Could not fetch audit logs. (Missing permissions?)")
+
+    if not lines:
+        lines.append("No recent suspicious actions found.")
+
+    e = discord.Embed(
+        title="🔍 Recent Audit Log Activity",
+        description="\n".join(lines[:20]),
+        color=0xfee75c,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text="Empire Security • Last 3 per action type")
+    await ctx.send(embed=e)
+
+@security_cmd.command(name="bots")
+@commands.has_permissions(administrator=True)
+async def sec_bots(ctx):
+    bots = [m for m in ctx.guild.members if m.bot]
+    if not bots:
+        return await ctx.send(embed=info_embed("🤖 Bots", "No bots found in this server."))
+    desc = "\n".join(f"▸ {b.mention} `{b.id}` — joined <t:{int(b.joined_at.timestamp())}:R>" for b in bots[:25])
+    e = discord.Embed(title=f"🤖 Bots in {ctx.guild.name} ({len(bots)})",
+                      description=desc, color=0x5865f2)
+    e.set_footer(text="Empire Prime Security • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@security_cmd.command(name="admins")
+@commands.has_permissions(administrator=True)
+async def sec_admins(ctx):
+    dangerous_perms = ["administrator", "manage_guild", "ban_members",
+                       "manage_roles", "manage_channels", "manage_webhooks"]
+    flagged = []
+    for member in ctx.guild.members:
+        if member.bot: continue
+        perms = member.guild_permissions
+        has_danger = [p for p in dangerous_perms if getattr(perms, p, False)]
+        if has_danger:
+            flagged.append((member, has_danger))
+
+    if not flagged:
+        return await ctx.send(embed=ok_embed("No members with elevated permissions found."))
+
+    desc = ""
+    for member, perms_list in flagged[:20]:
+        desc += f"▸ {member.mention} — `{'`, `'.join(perms_list)}`\n"
+
+    e = discord.Embed(
+        title=f"⚠️ Members with Elevated Permissions ({len(flagged)})",
+        description=desc,
+        color=0xfee75c
+    )
+    e.set_footer(text="Empire Security • Review these members regularly")
+    await ctx.send(embed=e)
+
+@security_cmd.command(name="newmembers")
+@commands.has_permissions(administrator=True)
+async def sec_newmembers(ctx, days: int = 7):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    new = [m for m in ctx.guild.members if m.joined_at and m.joined_at > cutoff and not m.bot]
+    if not new:
+        return await ctx.send(embed=info_embed("👤 New Members", f"No new members in the last {days} days."))
+    desc = "\n".join(
+        f"▸ {m.mention} — joined <t:{int(m.joined_at.timestamp())}:R> — acc: <t:{int(m.created_at.timestamp())}:R>"
+        for m in sorted(new, key=lambda x: x.joined_at, reverse=True)[:20]
+    )
+    e = discord.Embed(title=f"👤 New Members (last {days}d) — {len(new)} total",
+                      description=desc, color=0x57f287)
+    e.set_footer(text="Empire Prime Security • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@security_cmd.command(name="clearblocked")
+@commands.has_permissions(administrator=True)
+async def sec_clearblocked(ctx):
+    count = len(_blocked_users[ctx.guild.id])
+    _blocked_users[ctx.guild.id].clear()
+    await ctx.send(embed=ok_embed(f"<a:Tick:1483344124357644350> Cleared {count} rate-limited user(s)."))
+
+@security_cmd.command(name="resetpunished")
+@commands.has_permissions(administrator=True)
+async def sec_resetpunished(ctx):
+    count = len(_nuked_punished[ctx.guild.id])
+    _nuked_punished[ctx.guild.id].clear()
+    await ctx.send(embed=ok_embed(f"<a:Tick:1483344124357644350> Reset punished list. {count} user(s) cleared."))
+
+@security_cmd.command(name="checkreps")
+@commands.has_permissions(administrator=True)
+async def sec_checkreps(ctx):
+    flagged = []
+    for role in ctx.guild.roles:
+        if role.permissions.administrator and not role.is_default():
+            flagged.append(f"▸ {role.mention} — has `administrator`")
+        elif role.permissions.manage_guild:
+            flagged.append(f"▸ {role.mention} — has `manage_guild`")
+    if not flagged:
+        return await ctx.send(embed=ok_embed("<a:Tick:1483344124357644350> No overpowered roles found."))
+    e = discord.Embed(
+        title="⚠️ Potentially Dangerous Roles",
+        description="\n".join(flagged[:20]),
+        color=0xfee75c
+    )
+    e.set_footer(text="Empire Security • Review these roles")
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PREFIX COMMAND
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="setprefix")
+@commands.has_permissions(administrator=True)
+async def setprefix_cmd(ctx, new_prefix: str = None):
+    """Change the bot prefix for this server."""
+    if not new_prefix:
+        curr = GUILD_PREFIXES.get(ctx.guild.id, "$")
+        e = discord.Embed(
+            title="⚙️ Bot Prefix",
+            description=(
+                f"**Current prefix:** `{curr}`\n\n"
+                "Usage: `{curr}setprefix <new_prefix>`\n"
+                "Example: `{curr}setprefix !`"
+            ).format(curr=curr),
+            color=0x5865f2
+        )
+        e.set_footer(text="Empire • Made by Black Belt")
+        return await ctx.send(embed=e)
+
+    if len(new_prefix) > 5:
+        return await ctx.send(embed=err_embed("Prefix cannot be longer than 5 characters."))
+
+    GUILD_PREFIXES[ctx.guild.id] = new_prefix
+    DB.set_prefix(ctx.guild.id, new_prefix)
+    e = discord.Embed(
+        title="<a:Tick:1483344124357644350> Prefix Updated",
+        description=(
+            f"Bot prefix changed to **`{new_prefix}`**\n\n"
+            f"Now use `{new_prefix}help` to see all commands."
+        ),
+        color=0x57f287
+    )
+    e.set_footer(text=f"Empire • {ctx.guild.name} • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@bot.tree.command(name="setprefix", description="Change the bot prefix for this server")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(new_prefix="New prefix (max 5 chars), e.g. ! or ?")
+async def slash_setprefix(interaction: discord.Interaction, new_prefix: str):
+    if len(new_prefix) > 5:
+        return await interaction.response.send_message(
+            embed=err_embed("Prefix cannot be longer than 5 characters."), ephemeral=True)
+    GUILD_PREFIXES[interaction.guild.id] = new_prefix
+    DB.set_prefix(interaction.guild.id, new_prefix)
+    e = discord.Embed(
+        title="<a:Tick:1483344124357644350> Prefix Updated",
+        description=f"Bot prefix changed to **`{new_prefix}`**\nNow use `{new_prefix}help` to see all commands.",
+        color=0x57f287
+    )
+    e.set_footer(text=f"Empire • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ANTI-NUKE SLASH COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="antinuke-disable", description="Disable the Anti-Nuke protection system")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_an_disable(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    ANTINUKE_ENABLED[interaction.guild.id] = False
+    e = discord.Embed(
+        description="<a:disabled1:1483344744024248453> **Anti-Nuke has been DISABLED.**\nUse `/antinuke-enable` to re-enable.",
+        color=0xff0000
+    )
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="antinuke-status", description="Show Anti-Nuke status for this server")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_an_status(interaction: discord.Interaction):
+    guild = interaction.guild
+    gid = guild.id
+    status      = "<a:enabled:1483344741675569325> ENABLED"  if ANTINUKE_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    raid_status = "<a:enabled:1483344741675569325> ENABLED"  if _raid_shield.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    spam_status = "<a:enabled:1483344741675569325> ENABLED"  if ANTISPAM_ENABLED.get(gid) else "<a:disabled1:1483344744024248453> DISABLED"
+    lock_status = "<a:disabled1:1483344744024248453> ACTIVE"   if _lockdown_active.get(gid) else "<a:enabled:1483344741675569325> Normal"
+    punish_mode = ANTINUKE_PUNISHMENT.get(gid, "ban").upper()
+    log_ch_id   = ANTINUKE_LOG_CHANNEL.get(gid)
+    log_str     = f"<#{log_ch_id}>" if log_ch_id else "Not set"
+    e = discord.Embed(title="<a:antinuke:1483344748990435370> Anti-Nuke Status", color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+    e.add_field(name="<a:antinuke:1483344748990435370> Anti-Nuke",     value=status,       inline=True)
+    e.add_field(name="<a:POLICE:1483344078547456091> Raid Shield",   value=raid_status,  inline=True)
+    e.add_field(name="🚫 Anti-Spam",     value=spam_status,  inline=True)
+    e.add_field(name="🔒 Lockdown",      value=lock_status,  inline=True)
+    e.add_field(name="⚙️ Punishment",    value=f"`{punish_mode}`", inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Log Channel",   value=log_str,      inline=True)
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="antinuke-whitelist", description="Whitelist a user from Anti-Nuke checks")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(user="User to whitelist")
+async def slash_an_whitelist(interaction: discord.Interaction, user: discord.Member):
+    guild = interaction.guild
+    gid = guild.id
+    if user.id == guild.owner_id:
+        return await interaction.response.send_message(
+            embed=ok_embed("Server owner is always whitelisted!"), ephemeral=True)
+    ALL_AN_EVENTS = [
+        ("ban",":Ban"),("kick",":Kick"),("prune",":Prune Members"),("bot_add",":Bot Add"),
+        ("guild_update",":Guild Update"),("channel_create",":Channel Create"),
+        ("channel_delete",":Channel Delete"),("channel_update",":Channel Update"),
+        ("role_create",":Role Create"),("role_delete",":Role Delete"),("role_update",":Role Update"),
+        ("role_everyone",":Role Update With Dangerous Permissions"),("mass_mention",":Mention @everyone"),
+        ("webhook_create",":Webhook Create"),("webhook_update",":Webhook Update"),
+        ("webhook_delete",":Webhook Delete"),("member_update",":Member Update"),
+        ("member_dangerous",":Member Update With Dangerous Permissions"),
+        ("integration",":Anti Integration (Re-Adding Bot)"),
+        ("sticker",":Anti Sticker Update"),("emoji",":Anti Emoji Update"),
+    ]
+    user_wl = ANTINUKE_EVENT_WHITELIST[gid].get(user.id, set())
+    event_lines = "\n".join(
+        ("<a:Tick:1483344124357644350>" if (k in user_wl or user.id in ANTINUKE_WHITELIST[gid]) else "<a:disabled1:1483344744024248453>") + " " + lbl
+        for k, lbl in ALL_AN_EVENTS
+    )
+    e = discord.Embed(color=0x2b2d31)
+    e.description = f"**{user.display_name.upper()}**\n\n{event_lines}"
+    e.set_thumbnail(url=user.display_avatar.url)
+    e.add_field(name="🧑 Author", value=f"@{interaction.user.name}", inline=True)
+    e.add_field(name="🎯 Target", value=f"@{user.name}", inline=True)
+    e.set_footer(text="Powered by Empire Development™")
+    event_options = [discord.SelectOption(label="All Events", value="__all__")]
+    event_options += [discord.SelectOption(label=lbl.lstrip(":"), value=k) for k, lbl in ALL_AN_EVENTS]
+
+    class SlashWLView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+        @discord.ui.select(placeholder="Choose a category", min_values=1, max_values=1, options=event_options[:25])
+        async def sel(self, inter: discord.Interaction, select: discord.ui.Select):
+            if inter.user.id != interaction.user.id:
+                return await inter.response.send_message(embed=err_embed("Not your command."), ephemeral=True)
+            chosen = select.values[0]
+            if chosen == "__all__":
+                ANTINUKE_WHITELIST[gid].add(user.id)
+                ANTINUKE_EVENT_WHITELIST[gid][user.id] = {k for k,_ in ALL_AN_EVENTS}
+                wled = {k for k,_ in ALL_AN_EVENTS}
+            else:
+                ANTINUKE_EVENT_WHITELIST[gid].setdefault(user.id, set()).add(chosen)
+                wled = ANTINUKE_EVENT_WHITELIST[gid][user.id]
+            _T = "<a:Tick:1483344124357644350>"
+            _R = "<a:disabled1:1483344744024248453>"
+            new_lines = "\n".join(
+                (_T if (k in wled or user.id in ANTINUKE_WHITELIST[gid]) else _R) + " " + lbl
+                for k, lbl in ALL_AN_EVENTS
+            )
+            ne = discord.Embed(color=0x2b2d31)
+            ne.description = f"**{user.display_name.upper()}**\n\n{new_lines}"
+            ne.set_thumbnail(url=user.display_avatar.url)
+            ne.add_field(name="🧑 Author", value=f"@{interaction.user.name}", inline=True)
+            ne.add_field(name="🎯 Target", value=f"@{user.name}", inline=True)
+            ne.set_footer(text="Powered by Empire Development™")
+            await inter.response.edit_message(embed=ne, view=self)
+        @discord.ui.button(label="Whitelist All Event", style=discord.ButtonStyle.danger, emoji="<a:antinuke:1483344748990435370>", row=2)
+        async def wl_all(self, inter: discord.Interaction, btn: discord.ui.Button):
+            if inter.user.id != interaction.user.id:
+                return await inter.response.send_message(embed=err_embed("Not your command."), ephemeral=True)
+            ANTINUKE_WHITELIST[gid].add(user.id)
+            ANTINUKE_EVENT_WHITELIST[gid][user.id] = {k for k,_ in ALL_AN_EVENTS}
+            for c in self.children: c.disabled = True
+            new_lines = "\n".join("<a:enabled:1483344741675569325> " + lbl for _, lbl in ALL_AN_EVENTS)
+            ne = discord.Embed(color=0x2b2d31)
+            ne.description = f"**{user.display_name.upper()}**\n\n{new_lines}"
+            ne.set_thumbnail(url=user.display_avatar.url)
+            ne.add_field(name="🧑 Author", value=f"@{interaction.user.name}", inline=True)
+            ne.add_field(name="🎯 Target", value=f"@{user.name}", inline=True)
+            ne.set_footer(text="Powered by Empire Development™")
+            await inter.response.edit_message(embed=ne, view=self)
+    await interaction.response.send_message(embed=e, view=SlashWLView())
+
+@bot.tree.command(name="antinuke-raid", description="Toggle Raid Shield on/off")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(toggle="on or off")
+@app_commands.choices(toggle=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+async def slash_an_raid(interaction: discord.Interaction, toggle: str):
+    gid = interaction.guild.id
+    if toggle == "on":
+        _raid_shield[gid] = True
+        await interaction.response.send_message(embed=ok_embed(
+            f"<a:POLICE:1483344078547456091> **Raid Shield ENABLED!**\nIf **{RAID_JOIN_COUNT}+ members** join within **{RAID_JOIN_WIN}s**, server auto-lockdown."))
+    else:
+        _raid_shield[gid] = False
+        await interaction.response.send_message(embed=err_embed("<a:POLICE:1483344078547456091> Raid Shield disabled."))
+
+@bot.tree.command(name="antinuke-lock", description="Manually lock all channels (lockdown)")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_an_lock(interaction: discord.Interaction):
+    guild = interaction.guild
+    _lockdown_active[guild.id] = True
+    locked = 0
+    await interaction.response.defer()
+    for ch in guild.text_channels:
+        try:
+            await ch.set_permissions(guild.default_role, send_messages=False,
+                                     reason=f"[Anti-Nuke] Lockdown by {interaction.user}")
+            locked += 1
+        except: pass
+    e = discord.Embed(title="🔒 SERVER LOCKED DOWN",
+        description=f"**{locked} channels** locked.\nUse `/antinuke-unlock` to restore.",
+        color=0xff0000, timestamp=datetime.now(timezone.utc))
+    e.set_footer(text=f"Locked by {interaction.user} • Empire")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="antinuke-unlock", description="Lift server lockdown")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_an_unlock(interaction: discord.Interaction):
+    guild = interaction.guild
+    _lockdown_active[guild.id] = False
+    _join_times[guild.id].clear()
+    unlocked = 0
+    await interaction.response.defer()
+    for ch in guild.text_channels:
+        try:
+            await ch.set_permissions(guild.default_role, send_messages=None,
+                                     reason=f"[Anti-Nuke] Unlocked by {interaction.user}")
+            unlocked += 1
+        except: pass
+    await interaction.followup.send(embed=ok_embed(f"🔓 Lockdown lifted! {unlocked} channels restored."))
+
+@bot.tree.command(name="antispam", description="Toggle Anti-Spam protection")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(toggle="on or off")
+@app_commands.choices(toggle=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+async def slash_antispam(interaction: discord.Interaction, toggle: str):
+    gid = interaction.guild.id
+    if toggle == "on":
+        ANTISPAM_ENABLED[gid] = True
+        DB.set_antispam(gid, True)
+        await interaction.response.send_message(embed=ok_embed(
+            f"🚫 **Anti-Spam ENABLED!**\n{SPAM_MSG_MAX}+ msgs in {SPAM_MSG_WIN}s → {SPAM_TIMEOUT_MINS} min timeout."))
+    else:
+        ANTISPAM_ENABLED[gid] = False
+        DB.set_antispam(gid, False)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AUTOMOD SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+AUTOMOD_FEATURE_LABELS = {
+    "spam":          "Anti spam",
+    "caps":          "Anti caps",
+    "links":         "Anti link",
+    "discord_links": "Anti Discord link",
+    "mass_mention":  "Anti mass mention",
+    "emoji_spam":    "Anti emoji spam",
+    "token_spam":    "Anti Token Spam",
+    "ext_apps":      "Anti External Apps",
+    "nsfw_links":    "Anti NSFW link",
+    "invites":       "Anti Invites",
+}
+
+# Default punishment labels per feature
+_DEFAULT_PUNISH = {
+    "spam": "Mute", "caps": "Mute", "links": "Mute",
+    "mass_mention": "Mute", "emoji_spam": "Mute", "token_spam": "Mute",
+    "ext_apps": "Mute", "nsfw_links": "Block Message", "invites": "Block Message",
+}
+
+def _automod_config_embed(guild) -> discord.Embed:
+    """Olympus-style $automod config embed."""
+    gid = guild.id
+    am = _get_automod(gid)
+    punish = AUTOMOD_PUNISHMENT.get(gid, {})
+    log_ch_id = AUTOMOD_LOG_CHANNEL.get(gid) or ANTINUKE_LOG_CHANNEL.get(gid)
+    log_str = f"<#{log_ch_id}>" if log_ch_id else "`Not set`"
+
+    # Build per-feature lines (only enabled ones shown with punishment)
+    lines = ""
+    enabled_features = {k: v for k, v in AUTOMOD_FEATURE_LABELS.items() if am.get(k)}
+    for key, label in AUTOMOD_FEATURE_LABELS.items():
+        if am.get(key):
+            p = punish.get(key, _DEFAULT_PUNISH.get(key, "Mute"))
+            lines += f"**{label}**\n{p}\n\n"
+
+    if not lines:
+        lines = "*No automod features enabled.*\n*Use `$automod enable` to enable all.*\n\n"
+
+    lines += f"**Logging Channel**\n{log_str}"
+
+    e = discord.Embed(
+        description=(
+            f"**Enabled Automod Events & their punishment type for\n{guild.name}**\n\n"
+            f"{lines}\n\n"
+            f"-# Manage punishment type for events by executing `$automod punishment` command."
+        ),
+        color=0x2b2d31,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    return e
+
+def _automod_embed(guild, am: dict) -> discord.Embed:
+    lines = "\n".join(
+        ("<a:enabled:1483344741675569325>" if am.get(k) else "<a:disabled1:1483344744024248453>") + " " + label
+        for k, label in AUTOMOD_FEATURE_LABELS.items()
+    )
+    e = discord.Embed(
+        description=f"**{'Automod Enabled Successfully' if any(am.values()) else 'Automod Disabled'}**\n\n{lines}",
+        color=0x2b2d31 if any(am.values()) else 0xff0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    return e
+
+
+@bot.group(name="automod", aliases=["am"], invoke_without_command=True)
+@commands.has_permissions(administrator=True)
+async def automod_group(ctx):
+    # Redirect to $automod enable for Olympus-style setup
+    await ctx.invoke(automod_enable_all)
+    return
+
+    guild = ctx.guild
+    gid   = guild.id
+    am    = _get_automod(gid)
+
+    def build_automod_panel_embed(am_state):
+        lines = "\n".join(
+            ("<a:enabled:1483344741675569325>" if am_state.get(k) else "<a:disabled1:1483344744024248453>") + " " + label
+            for k, label in AUTOMOD_FEATURE_LABELS.items()
+        )
+        e = discord.Embed(
+            title=f"🤖  Automod — {guild.name}",
+            description=f"{lines}",
+            color=0x2b2d31,
+            timestamp=datetime.now(timezone.utc)
+        )
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+        return e
+
+    # Build dropdown options
+    feature_options = [
+        discord.SelectOption(
+            label=label,
+            value=key,
+            emoji="<a:enabled:1483344741675569325>" if am.get(key) else "<a:disabled1:1483344744024248453>",
+            description=f"Currently {'ON' if am.get(key) else 'OFF'} — click to toggle"
+        )
+        for key, label in AUTOMOD_FEATURE_LABELS.items()
+    ]
+
+    class AutomodPanelView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=120)
+
+        @discord.ui.select(
+            placeholder="Toggle a feature on/off...",
+            min_values=1,
+            max_values=1,
+            options=feature_options
+        )
+        async def feature_toggle(self, interaction: discord.Interaction, select: discord.ui.Select):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can use this."), ephemeral=True)
+            key = select.values[0]
+            am  = _get_automod(gid)
+            # Toggle
+            am[key] = not am.get(key, False)
+            if key == "spam":
+                ANTISPAM_ENABLED[gid] = am[key]
+                DB.set_antispam(gid, am[key])
+            status = "<a:enabled:1483344741675569325> Enabled" if am[key] else "<a:disabled1:1483344744024248453> Disabled"
+            label  = AUTOMOD_FEATURE_LABELS.get(key, key)
+
+            # Rebuild dropdown with updated emojis
+            new_opts = [
+                discord.SelectOption(
+                    label=lbl,
+                    value=k,
+                    emoji="<a:enabled:1483344741675569325>" if am.get(k) else "<a:disabled1:1483344744024248453>",
+                    description=f"Currently {'ON' if am.get(k) else 'OFF'} — click to toggle"
+                )
+                for k, lbl in AUTOMOD_FEATURE_LABELS.items()
+            ]
+            self.feature_toggle.options = new_opts
+
+            # Rebuild embed
+            new_e = build_automod_panel_embed(am)
+            await interaction.response.edit_message(embed=new_e, view=self)
+
+        @discord.ui.button(label="✅ Enable All", style=discord.ButtonStyle.success, row=2)
+        async def enable_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can use this."), ephemeral=True)
+            if not is_owner(ctx):
+                return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+            am = _get_automod(gid)
+            for k in am: am[k] = True
+            ANTISPAM_ENABLED[gid] = True
+            DB.set_antispam(gid, True)
+            new_opts = [
+                discord.SelectOption(label=lbl, value=k, emoji="<a:enabled:1483344741675569325>",
+                    description="Currently ON — click to toggle")
+                for k, lbl in AUTOMOD_FEATURE_LABELS.items()
+            ]
+            self.feature_toggle.options = new_opts
+            await interaction.response.edit_message(embed=build_automod_panel_embed(am), view=self)
+
+        @discord.ui.button(label="❌ Disable All", style=discord.ButtonStyle.danger, row=2)
+        async def disable_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(
+                    embed=err_embed("Only the command user can use this."), ephemeral=True)
+            if not is_owner(ctx):
+                return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+            am = _get_automod(gid)
+            for k in am: am[k] = False
+            ANTISPAM_ENABLED[gid] = False
+            DB.set_antispam(gid, False)
+            new_opts = [
+                discord.SelectOption(label=lbl, value=k, emoji="<a:disabled1:1483344744024248453>",
+                    description="Currently OFF — click to toggle")
+                for k, lbl in AUTOMOD_FEATURE_LABELS.items()
+            ]
+            self.feature_toggle.options = new_opts
+            await interaction.response.edit_message(embed=build_automod_panel_embed(am), view=self)
+
+    await ctx.send(embed=build_automod_panel_embed(am), view=AutomodPanelView())
+
+
+@automod_group.command(name="enable")
+@commands.has_permissions(administrator=True)
+async def automod_enable_all(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    gid = guild.id
+    am = _get_automod(gid)
+
+    TICK  = "<a:enabled:1483344741675569325>"
+    CROSS = "<a:disabled1:1483344744024248453>"
+
+    def build_embed():
+        lines = "\n".join(
+            f"{TICK if am.get(k) else CROSS} {TICK} : {label}"
+            for k, label in AUTOMOD_FEATURE_LABELS.items()
+        )
+        e = discord.Embed(
+            color=0x2b2d31,
+            timestamp=datetime.now(timezone.utc)
+        )
+        e.description = f"**{ctx.author.display_name}'s Automod Setup**\n\n{lines}"
+        e.set_thumbnail(url=guild.icon.url if guild.icon else guild.me.display_avatar.url)
+        e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+        return e
+
+    select_options = [
+        discord.SelectOption(label=label, value=key)
+        for key, label in AUTOMOD_FEATURE_LABELS.items()
+    ]
+
+    class AutomodEnableView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(
+            placeholder="Select events to enable",
+            min_values=1, max_values=1,
+            options=select_options
+        )
+        async def select_event(self, interaction: discord.Interaction, select: discord.ui.Select):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            key = select.values[0]
+            am[key] = True
+            if key == "spam":
+                ANTISPAM_ENABLED[gid] = True
+                DB.set_antispam(gid, True)
+            await interaction.response.edit_message(embed=build_embed(), view=self)
+
+        @discord.ui.button(label="Enable for All Events", style=discord.ButtonStyle.primary, row=2)
+        async def enable_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            for k in am: am[k] = True
+            ANTISPAM_ENABLED[gid] = True
+            DB.set_antispam(gid, True)
+            for child in self.children: child.disabled = True
+            lines = "\n".join(f"{TICK} {TICK} : {label}" for label in AUTOMOD_FEATURE_LABELS.values())
+            e = discord.Embed(
+                description=f"**Automod Enabled Successfully**\n\n{lines}",
+                color=0x2b2d31, timestamp=datetime.now(timezone.utc)
+            )
+            e.set_thumbnail(url=guild.me.display_avatar.url)
+            e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+            await interaction.response.edit_message(embed=e, view=self)
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=2)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            for child in self.children: child.disabled = True
+            await interaction.response.edit_message(embed=err_embed("Automod setup cancelled."), view=self)
+
+    await ctx.send(embed=build_embed(), view=AutomodEnableView())
+
+
+@automod_group.command(name="disable")
+@commands.has_permissions(administrator=True)
+async def automod_disable_all(ctx):
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    am = _get_automod(guild.id)
+    for k in am: am[k] = False
+    ANTISPAM_ENABLED[guild.id] = False
+    lines = "\n".join("<a:disabled1:1483344744024248453> " + label for label in AUTOMOD_FEATURE_LABELS.values())
+    e = discord.Embed(
+        description=f"**Automod Disabled**\n\n{lines}",
+        color=0xff0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+@automod_group.command(name="status")
+@commands.has_permissions(administrator=True)
+async def automod_status(ctx):
+    am = _get_automod(ctx.guild.id)
+    await ctx.send(embed=_automod_embed(ctx.guild, am))
+
+
+@automod_group.command(name="config")
+@commands.has_permissions(administrator=True)
+async def automod_config(ctx):
+    """Show Olympus-style automod config with punishments and log channel."""
+    await ctx.send(embed=_automod_config_embed(ctx.guild))
+
+
+@automod_group.command(name="logging")
+@commands.has_permissions(administrator=True)
+async def automod_logging(ctx, channel: discord.TextChannel = None):
+    """Set the automod logging channel."""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    ch = channel or ctx.channel
+    AUTOMOD_LOG_CHANNEL[guild.id] = ch.id
+
+    e = discord.Embed(color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+    e.description = (
+        f"**Automod Settings for {guild.name}**\n\n"
+        f"✔️  | Automoderation Logging channel set to {ch.mention}\n\n"
+        f"→ Use `$automod config` to view current Automod settings.\n\n"
+        f"🔧  *\"automod logging\" Command executed by {ctx.author.name}*"
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+@automod_group.command(name="punishment")
+@commands.has_permissions(administrator=True)
+async def automod_punishment_cmd(ctx, feature: str = None, punishment: str = None):
+    """Set punishment for a specific automod feature. Features: spam, caps, links, invites, emoji, nsfw, extapps, token, mention. Punishments: mute, delete, kick, ban"""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    gid = guild.id
+    _get_automod(gid)  # ensure initialized
+    punish = AUTOMOD_PUNISHMENT[gid]
+
+    FEATURE_MAP = {
+        "spam": "spam", "caps": "caps", "links": "links", "invites": "invites",
+        "emoji": "emoji_spam", "nsfw": "nsfw_links", "extapps": "ext_apps",
+        "token": "token_spam", "mention": "mass_mention",
+    }
+    PUNISH_LABELS = {
+        "mute": "Mute", "delete": "Block Message", "kick": "Kick", "ban": "Ban"
+    }
+
+    if not feature or not punishment:
+        prefix = GUILD_PREFIXES.get(gid, "$")
+        lines = "\n".join(
+            f"**{label}** — `{punish.get(k, _DEFAULT_PUNISH.get(k, 'Mute'))}`"
+            for k, label in AUTOMOD_FEATURE_LABELS.items()
+        )
+        e = discord.Embed(
+            title="⚙️ Automod Punishments",
+            description=(
+                f"{lines}\n\n"
+                f"**Change:** `{prefix}automod punishment <feature> <mute/delete/kick/ban>`\n"
+                f"Features: `spam` `caps` `links` `invites` `emoji` `nsfw` `extapps` `token` `mention`"
+            ),
+            color=0x2b2d31
+        )
+        e.set_thumbnail(url=guild.me.display_avatar.url)
+        e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+        return await ctx.send(embed=e)
+
+    feature_key = FEATURE_MAP.get(feature.lower())
+    punish_val = punishment.lower()
+    if not feature_key:
+        return await ctx.send(embed=err_embed(f"Unknown feature `{feature}`.\nUse: `spam` `caps` `links` `invites` `emoji` `nsfw` `extapps` `token` `mention`"))
+    if punish_val not in PUNISH_LABELS:
+        return await ctx.send(embed=err_embed("Punishment must be: `mute` `delete` `kick` `ban`"))
+
+    punish[feature_key] = punish_val
+    label = AUTOMOD_FEATURE_LABELS.get(feature_key, feature_key)
+    await ctx.send(embed=ok_embed(f"<a:enabled:1483344741675569325> **{label}** punishment set to `{PUNISH_LABELS[punish_val]}`."))
+
+
+@automod_group.command(name="wlrole")
+@commands.has_permissions(administrator=True)
+async def automod_wlrole(ctx, role: discord.Role = None):
+    """Whitelist a role from automod checks."""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    guild = ctx.guild
+    if not role:
+        wl = AUTOMOD_WL_ROLES.get(guild.id, set())
+        if not wl:
+            return await ctx.send(embed=info_embed("🎭 Automod Role Whitelist", "No roles whitelisted.\nUse `$automod wlrole @role` to add."))
+        lines = "\n".join(f"▸ <@&{rid}>" for rid in wl)
+        return await ctx.send(embed=info_embed("🎭 Automod Whitelisted Roles", lines))
+
+    AUTOMOD_WL_ROLES[guild.id].add(role.id)
+    await ctx.send(embed=ok_embed(
+        f"🎭 {role.mention} whitelisted from **Automod** checks.\n"
+        f"All members with this role will bypass automod."
+    ))
+
+
+@automod_group.command(name="unwlrole")
+@commands.has_permissions(administrator=True)
+async def automod_unwlrole(ctx, role: discord.Role):
+    AUTOMOD_WL_ROLES[ctx.guild.id].discard(role.id)
+    await ctx.send(embed=ok_embed(f"🗑️ {role.mention} removed from Automod whitelist."))
+
+
+def _make_automod_toggle(feature_key: str):
+    @automod_group.command(name=feature_key if feature_key != "emoji_spam" else "emoji")
+    @commands.has_permissions(administrator=True)
+    async def _toggle(ctx, toggle: str = "on"):
+        am = _get_automod(ctx.guild.id)
+        am[feature_key] = toggle.lower() in ("on", "enable", "1", "true")
+        label = AUTOMOD_FEATURE_LABELS[feature_key]
+        status = "<a:enabled:1483344741675569325> Enabled" if am[feature_key] else "<a:disabled1:1483344744024248453> Disabled"
+        await ctx.send(embed=discord.Embed(
+            description=f"{status} **{label}** for this server.",
+            color=0x57f287 if am[feature_key] else 0xff0000
+        ))
+    return _toggle
+
+# Individual toggle subcommands
+_make_automod_toggle("caps")
+_make_automod_toggle("links")
+_make_automod_toggle("invites")
+_make_automod_toggle("nsfw_links")
+_make_automod_toggle("ext_apps")
+_make_automod_toggle("token_spam")
+_make_automod_toggle("mass_mention")
+
+@automod_group.command(name="spam")
+@commands.has_permissions(administrator=True)
+async def automod_spam(ctx, toggle: str = "on"):
+    am = _get_automod(ctx.guild.id)
+    am["spam"] = toggle.lower() in ("on", "enable", "1", "true")
+    ANTISPAM_ENABLED[ctx.guild.id] = am["spam"]
+    status = "<a:enabled:1483344741675569325> Enabled" if am["spam"] else "<a:disabled1:1483344744024248453> Disabled"
+    await ctx.send(embed=discord.Embed(
+        description=f"{status} **Anti spam** for this server.",
+        color=0x57f287 if am["spam"] else 0xff0000
+    ))
+
+@automod_group.command(name="emoji")
+@commands.has_permissions(administrator=True)
+async def automod_emoji(ctx, toggle: str = "on"):
+    am = _get_automod(ctx.guild.id)
+    am["emoji_spam"] = toggle.lower() in ("on", "enable", "1", "true")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["emoji_spam"] else "<a:disabled1:1483344744024248453> Disabled"
+    await ctx.send(embed=discord.Embed(
+        description=f"{status} **Anti emoji spam** for this server.",
+        color=0x57f287 if am["emoji_spam"] else 0xff0000
+    ))
+
+@automod_group.command(name="mention")
+@commands.has_permissions(administrator=True)
+async def automod_mention(ctx, toggle: str = "on"):
+    am = _get_automod(ctx.guild.id)
+    am["mass_mention"] = toggle.lower() in ("on", "enable", "1", "true")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["mass_mention"] else "<a:disabled1:1483344744024248453> Disabled"
+    await ctx.send(embed=discord.Embed(
+        description=f"{status} **Anti mass mention** for this server.",
+        color=0x57f287 if am["mass_mention"] else 0xff0000
+    ))
+
+@automod_group.command(name="extapps")
+@commands.has_permissions(administrator=True)
+async def automod_extapps(ctx, toggle: str = "on"):
+    am = _get_automod(ctx.guild.id)
+    am["ext_apps"] = toggle.lower() in ("on", "enable", "1", "true")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["ext_apps"] else "<a:disabled1:1483344744024248453> Disabled"
+    await ctx.send(embed=discord.Embed(
+        description=f"{status} **Anti External Apps** for this server.",
+        color=0x57f287 if am["ext_apps"] else 0xff0000
+    ))
+
+@automod_group.command(name="token")
+@commands.has_permissions(administrator=True)
+async def automod_token(ctx, toggle: str = "on"):
+    am = _get_automod(ctx.guild.id)
+    am["token_spam"] = toggle.lower() in ("on", "enable", "1", "true")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["token_spam"] else "<a:disabled1:1483344744024248453> Disabled"
+    await ctx.send(embed=discord.Embed(
+        description=f"{status} **Anti Token Spam** for this server.",
+        color=0x57f287 if am["token_spam"] else 0xff0000
+    ))
+
+
+@automod_group.command(name="discordlinks", aliases=["dlinks", "dclinks"])
+@commands.has_permissions(administrator=True)
+async def automod_discordlinks(ctx, toggle: str = "on"):
+    """Toggle Anti Discord Links — blocks discord.gg and discord.com/invite links."""
+    am = _get_automod(ctx.guild.id)
+    am["discord_links"] = toggle.lower() in ("on", "enable", "1", "true")
+    mins = _get_timeout_mins(ctx.guild.id, "discord_links")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["discord_links"] else "<a:disabled1:1483344744024248453> Disabled"
+    prefix = GUILD_PREFIXES.get(ctx.guild.id, "$")
+    e = discord.Embed(
+        title="🔗 Anti Discord Links",
+        description=(
+            f"{status} **Anti Discord Links**\n\n"
+            f"{'Anyone posting discord.gg links will be timed out automatically.' if am['discord_links'] else 'Discord links are now allowed.'}\n\n"
+            f"**Current timeout:** `{mins} minutes`\n"
+            f"Change with: `{prefix}automod settimeout discordlinks <minutes>`"
+        ),
+        color=0x57f287 if am["discord_links"] else 0xff0000
+    )
+    e.set_footer(text="Empire Automod • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+@automod_group.command(name="settimeout")
+@commands.has_permissions(administrator=True)
+async def automod_settimeout(ctx, feature: str = None, minutes: int = None):
+    """Set timeout duration for an automod feature.
+    Features: spam, caps, links, discordlinks, invites, emoji, nsfw, extapps, token, mention
+    Example: $automod settimeout discordlinks 30"""
+    guild = ctx.guild
+    gid = guild.id
+    prefix = GUILD_PREFIXES.get(gid, "$")
+
+    TIMEOUT_FEATURE_MAP = {
+        "spam": "spam", "caps": "caps", "links": "links",
+        "discordlinks": "discord_links", "dlinks": "discord_links", "dclinks": "discord_links",
+        "invites": "invites", "emoji": "emoji_spam", "nsfw": "nsfw_links",
+        "extapps": "ext_apps", "token": "token_spam", "mention": "mass_mention",
+    }
+
+    if not feature or minutes is None:
+        if gid not in AUTOMOD_TIMEOUTS:
+            AUTOMOD_TIMEOUTS[gid] = {}
+        lines = "\n".join(
+            f"▸ `{feat}` — **{AUTOMOD_TIMEOUTS[gid].get(key, _DEFAULT_TIMEOUTS.get(key, 10))} min**"
+            for feat, key in TIMEOUT_FEATURE_MAP.items() if feat not in ("dlinks", "dclinks")
+        )
+        e = discord.Embed(
+            title="<a:clock:1483340836467900507> Automod Timeout Durations",
+            description=(
+                f"{lines}\n\n"
+                f"**Change:** `{prefix}automod settimeout <feature> <minutes>`\n"
+                f"Example: `{prefix}automod settimeout discordlinks 30`"
+            ),
+            color=0x5865f2
+        )
+        e.set_footer(text="Empire Automod • Made by Black Belt")
+        return await ctx.send(embed=e)
+
+    feature_key = TIMEOUT_FEATURE_MAP.get(feature.lower())
+    if not feature_key:
+        return await ctx.send(embed=err_embed(
+            f"Unknown feature `{feature}`.\n"
+            f"Use: `spam` `caps` `links` `discordlinks` `invites` `emoji` `nsfw` `extapps` `token` `mention`"
+        ))
+
+    if minutes < 1 or minutes > 10080:  # max 1 week
+        return await ctx.send(embed=err_embed("Timeout must be between **1** and **10080** minutes (1 week)."))
+
+    if gid not in AUTOMOD_TIMEOUTS:
+        AUTOMOD_TIMEOUTS[gid] = {}
+    AUTOMOD_TIMEOUTS[gid][feature_key] = minutes
+
+    label = AUTOMOD_FEATURE_LABELS.get(feature_key, feature_key)
+    e = discord.Embed(
+        title="<a:clock:1483340836467900507> Timeout Updated",
+        description=(
+            f"**{label}** timeout set to **`{minutes} minutes`**\n\n"
+            f"Anyone triggering this filter will be timed out for **{minutes} min**."
+        ),
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Automod • Made by Black Belt")
+    await ctx.send(embed=e)
+
+# ── Slash: /automod ───────────────────────────────────────────────────────────
+@bot.tree.command(name="automod-enable", description="Enable automod features (Olympus style)")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_automod_enable(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    guild = interaction.guild
+    gid   = guild.id
+    am    = _get_automod(gid)
+    TICK  = "<a:enabled:1483344741675569325>"
+    CROSS = "<a:disabled1:1483344744024248453>"
+
+    def build_embed():
+        lines = "\n".join(
+            f"{TICK if am.get(k) else CROSS} {TICK} : {label}"
+            for k, label in AUTOMOD_FEATURE_LABELS.items()
+        )
+        e = discord.Embed(color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+        e.description = f"**{interaction.user.display_name}'s Automod Setup**\n\n{lines}"
+        e.set_thumbnail(url=guild.icon.url if guild.icon else guild.me.display_avatar.url)
+        e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+        return e
+
+    select_options = [
+        discord.SelectOption(label=label, value=key)
+        for key, label in AUTOMOD_FEATURE_LABELS.items()
+    ]
+
+    class SlashAutomodView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(placeholder="Select events to enable", min_values=1, max_values=1, options=select_options)
+        async def select_event(self, inter: discord.Interaction, select: discord.ui.Select):
+            if inter.user.id != interaction.user.id:
+                return await inter.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            key = select.values[0]
+            am[key] = True
+            if key == "spam": ANTISPAM_ENABLED[gid] = True
+            await inter.response.edit_message(embed=build_embed(), view=self)
+
+        @discord.ui.button(label="Enable for All Events", style=discord.ButtonStyle.primary, row=2)
+        async def enable_all(self, inter: discord.Interaction, button: discord.ui.Button):
+            if inter.user.id != interaction.user.id:
+                return await inter.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            for k in am: am[k] = True
+            ANTISPAM_ENABLED[gid] = True
+            DB.set_antispam(gid, True)
+            for child in self.children: child.disabled = True
+            lines = "\n".join(f"{TICK} {TICK} : {label}" for label in AUTOMOD_FEATURE_LABELS.values())
+            e = discord.Embed(description=f"**Automod Enabled Successfully**\n\n{lines}", color=0x2b2d31, timestamp=datetime.now(timezone.utc))
+            e.set_thumbnail(url=guild.icon.url if guild.icon else guild.me.display_avatar.url)
+            e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+            await inter.response.edit_message(embed=e, view=self)
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=2)
+        async def cancel(self, inter: discord.Interaction, button: discord.ui.Button):
+            if inter.user.id != interaction.user.id:
+                return await inter.response.send_message(embed=err_embed("Only the command user can use this."), ephemeral=True)
+            for child in self.children: child.disabled = True
+            await inter.response.edit_message(embed=discord.Embed(description="Automod setup cancelled.", color=0xff0000), view=self)
+
+    await interaction.response.send_message(embed=build_embed(), view=SlashAutomodView())
+
+@bot.tree.command(name="automod-disable", description="Disable ALL automod features")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_automod_disable(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    am = _get_automod(interaction.guild.id)
+    for k in am: am[k] = False
+    ANTISPAM_ENABLED[interaction.guild.id] = False
+    lines = "\n".join("<a:disabled1:1483344744024248453> " + label for label in AUTOMOD_FEATURE_LABELS.values())
+    e = discord.Embed(description=f"**Automod Disabled**\n\n{lines}", color=0xff0000,
+                      timestamp=datetime.now(timezone.utc))
+    e.set_thumbnail(url=interaction.guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=interaction.guild.me.display_avatar.url)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="automod-discordlinks", description="Toggle Anti Discord Links (discord.gg blocker)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(toggle="on or off")
+@app_commands.choices(toggle=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+async def slash_automod_dclinks(interaction: discord.Interaction, toggle: str):
+    am = _get_automod(interaction.guild.id)
+    am["discord_links"] = toggle == "on"
+    mins = _get_timeout_mins(interaction.guild.id, "discord_links")
+    status = "<a:enabled:1483344741675569325> Enabled" if am["discord_links"] else "<a:disabled1:1483344744024248453> Disabled"
+    e = discord.Embed(
+        title="🔗 Anti Discord Links",
+        description=(
+            f"{status} **Anti Discord Links**\n\n"
+            f"**Current timeout:** `{mins} minutes`\n"
+            f"Change with: `$automod settimeout discordlinks <minutes>`"
+        ),
+        color=0x57f287 if am["discord_links"] else 0xff0000
+    )
+    await interaction.response.send_message(embed=e)
+
+
+@bot.tree.command(name="automod-settimeout", description="Set timeout duration for an automod feature")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    feature="Feature name (spam, caps, links, discordlinks, invites, emoji, nsfw, token, mention)",
+    minutes="Timeout duration in minutes (1-10080)"
+)
+async def slash_automod_settimeout(interaction: discord.Interaction, feature: str, minutes: int):
+    TIMEOUT_FEATURE_MAP = {
+        "spam": "spam", "caps": "caps", "links": "links",
+        "discordlinks": "discord_links", "invites": "invites",
+        "emoji": "emoji_spam", "nsfw": "nsfw_links",
+        "extapps": "ext_apps", "token": "token_spam", "mention": "mass_mention",
+    }
+    gid = interaction.guild.id
+    feature_key = TIMEOUT_FEATURE_MAP.get(feature.lower())
+    if not feature_key:
+        return await interaction.response.send_message(
+            embed=err_embed(f"Unknown feature `{feature}`."), ephemeral=True)
+    if minutes < 1 or minutes > 10080:
+        return await interaction.response.send_message(
+            embed=err_embed("Timeout must be 1–10080 minutes."), ephemeral=True)
+    if gid not in AUTOMOD_TIMEOUTS:
+        AUTOMOD_TIMEOUTS[gid] = {}
+    AUTOMOD_TIMEOUTS[gid][feature_key] = minutes
+    label = AUTOMOD_FEATURE_LABELS.get(feature_key, feature_key)
+    await interaction.response.send_message(embed=ok_embed(
+        f"<a:clock:1483340836467900507> **{label}** timeout set to **{minutes} minutes**."
+    ))
+
+
+@bot.tree.command(name="automod-status", description="View automod status")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_automod_status(interaction: discord.Interaction):
+    am = _get_automod(interaction.guild.id)
+    await interaction.response.send_message(embed=_automod_embed(interaction.guild, am))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ██╗   ██╗███████╗██████╗ ██╗███████╗██╗ ██████╗ █████╗ ████████╗██╗ ██████╗ ███╗   ██╗
+#  VERIFICATION SYSTEM — Empire Edition
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# guild_id → {verified_role_id, unverified_role_id, verify_ch_id, verify_log_ch_id}
+VERIFY_CONFIG = {}
+
+def _get_verify_cfg(gid):
+    """Always fresh from DB so dashboard changes apply instantly."""
+    row = DB.get_verify_config(gid)
+    VERIFY_CONFIG[gid] = {
+        "verified_role":   row.get("verified_role") or None,
+        "unverified_role": row.get("unverified_role") or None,
+        "verify_ch":       row.get("verify_channel") or None,
+        "verify_log_ch":   row.get("log_channel") or None,
+    }
+    return VERIFY_CONFIG[gid]
+
+def _save_verify_cfg(gid):
+    """Persist current verify config to DB."""
+    cfg = VERIFY_CONFIG.get(gid, {})
+    DB.save_verify_config(gid,
+        verified_role   = cfg.get("verified_role")   or 0,
+        unverified_role = cfg.get("unverified_role") or 0,
+        verify_channel  = cfg.get("verify_ch")       or 0,
+        log_channel     = cfg.get("verify_log_ch")   or 0,
+        enabled         = 1 if cfg.get("verified_role") else 0,
+    )
+
+
+class VerifyButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Verify Me",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+        custom_id="empire_verify_btn",
+        row=0
+    )
+    async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            guild  = interaction.guild
+            member = interaction.user
+            gid    = guild.id
+            cfg    = _get_verify_cfg(gid)
+
+            verified_role_id   = cfg.get("verified_role")
+            unverified_role_id = cfg.get("unverified_role")
+            log_ch_id          = cfg.get("verify_log_ch")
+
+            # Auto-find roles by name if IDs not set (after bot restart)
+            if not verified_role_id:
+                r = discord.utils.get(guild.roles, name="Verified")
+                if r:
+                    cfg["verified_role"] = r.id
+                    verified_role_id = r.id
+            if not unverified_role_id:
+                r = discord.utils.get(guild.roles, name="Unverified")
+                if r:
+                    cfg["unverified_role"] = r.id
+                    unverified_role_id = r.id
+            if not log_ch_id:
+                lc = discord.utils.get(guild.text_channels, name="verify-logs")
+                if lc:
+                    cfg["verify_log_ch"] = lc.id
+                    log_ch_id = lc.id
+
+            verified_role   = guild.get_role(verified_role_id)   if verified_role_id   else None
+            unverified_role = guild.get_role(unverified_role_id) if unverified_role_id else None
+
+            if not verified_role:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        description="<a:disabled1:1483344744024248453> **Verified role not found!**\nAsk an admin to run `$verify setup` first.",
+                        color=0xff0000
+                    ), ephemeral=True)
+
+            if verified_role in member.roles:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        description="<a:enabled:1483344741675569325> **You are already verified!**\nYou already have full access.",
+                        color=0x57f287
+                    ), ephemeral=True)
+
+            # Assign verified role + remove unverified
+            try:
+                await member.add_roles(verified_role, reason="[Empire] Verification")
+                if unverified_role and unverified_role in member.roles:
+                    await member.remove_roles(unverified_role, reason="[Empire] Verification complete")
+            except Exception as ex:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(
+                        description=f"<a:disabled1:1483344744024248453> **Could not assign role!**\n`{ex}`\n\nBot role must be **above** Verified/Unverified roles!",
+                        color=0xff0000
+                    ), ephemeral=True)
+
+            # Member details for log
+            account_age  = (datetime.now(timezone.utc) - member.created_at).days
+            warns        = warn_map.get((gid, member.id), [])
+            warn_count   = len(warns)
+            invites_data = invite_tracker[gid].get(member.id, {})
+            is_new_acc   = account_age < 7
+            acc_color    = 0xff0000 if account_age < 3 else (0xffa500 if account_age < 30 else 0x57f287)
+
+            # Reply to user - simple verified message
+            verified_embed = discord.Embed(
+                title="<a:enabled:1483344741675569325> Verified!",
+                description=(
+                    f"Welcome to **{guild.name}**, {member.mention}!\n"
+                    f"You now have full access to the server."
+                ),
+                color=0x57f287
+            )
+            await interaction.response.send_message(embed=verified_embed, ephemeral=True)
+
+            # Send verify log
+            if log_ch_id:
+                log_ch = guild.get_channel(log_ch_id)
+                if log_ch:
+                    e = discord.Embed(
+                        title="<a:enabled:1483344741675569325>  Member Verified",
+                        color=acc_color,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    e.set_author(name=str(member), icon_url=member.display_avatar.url)
+                    e.set_thumbnail(url=member.display_avatar.url)
+                    e.add_field(
+                        name="👤 User Info",
+                        value=(
+                            f"**Name:** {member.mention}\n"
+                            f"**Username:** `{member.name}`\n"
+                            f"**ID:** `{member.id}`"
+                        ),
+                        inline=True
+                    )
+                    e.add_field(
+                        name="📅 Account Details",
+                        value=(
+                            f"**Created:** <t:{int(member.created_at.timestamp())}:R>\n"
+                            f"**Account Age:** `{account_age} days`\n"
+                            f"**Joined Server:** <t:{int(member.joined_at.timestamp())}:R>"
+                        ),
+                        inline=True
+                    )
+                    e.add_field(name="\u200b", value="\u200b", inline=True)
+                    new_acc_str = "⚠️ **YES**" if is_new_acc else "<a:enabled:1483344741675569325> No"
+                    age_str = "<a:disabled1:1483344744024248453> < 3 days" if account_age < 3 else "🟡 < 30 days" if account_age < 30 else "<a:enabled:1483344741675569325> OK"
+                    e.add_field(
+                        name="⚠️ Safety Check",
+                        value=(
+                            f"**Warnings:** `{warn_count}`\n"
+                            f"**New Account:** {new_acc_str}\n"
+                            f"**Age Status:** {age_str}"
+                        ),
+                        inline=True
+                    )
+                    e.add_field(
+                        name="<a:Announcement:1483344095228461056> Invite Stats",
+                        value=(
+                            f"**Invites:** `{invites_data.get('invites', 0)}`\n"
+                            f"**Fake:** `{invites_data.get('fake', 0)}`\n"
+                            f"**Left:** `{invites_data.get('left', 0)}`"
+                        ),
+                        inline=True
+                    )
+                    e.add_field(name="\u200b", value="\u200b", inline=True)
+                    if warns:
+                        warn_lines = "\n".join(f"`{i+1}.` {w['reason']}" for i, w in enumerate(warns[:3]))
+                        e.add_field(name=f"<a:Moderation:1483344127071486123> Recent Warnings ({warn_count})", value=warn_lines, inline=False)
+                    e.set_footer(
+                        text=f"Empire Verification • {guild.name}",
+                        icon_url=guild.me.display_avatar.url
+                    )
+                    try:
+                        await log_ch.send(embed=e)
+                    except:
+                        pass
+
+        except Exception as outer_ex:
+            try:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        description=f"<a:disabled1:1483344744024248453> Verification error: `{outer_ex}`\nPlease contact an admin.",
+                        color=0xff0000
+                    ), ephemeral=True)
+            except:
+                pass
+
+# Register persistent view
+# VerifyButton registered in on_ready for proper persistence
+
+# ─── Standalone Authorize View (for $verify panel) ────────────────────────────
+class AuthorizeView(discord.ui.View):
+    """Shows both Verify Me + Authorize buttons on the panel"""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        oauth_link = f"{OAUTH_BASE_URL}/authorize?guild_id={guild_id}"
+        self.add_item(discord.ui.Button(
+            label="Authorize Bot (Nuke Recovery)",
+            style=discord.ButtonStyle.link,
+            url=oauth_link,
+            emoji="<a:antinuke:1483344748990435370>",
+            row=1
+        ))
+
+
+# ─── $verify setup ────────────────────────────────────────────────────────────
+@bot.group(name="verify", aliases=["veri"], invoke_without_command=True)
+@commands.has_permissions(administrator=True)
+async def verify_group(ctx):
+    prefix = GUILD_PREFIXES.get(ctx.guild.id, "$")
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Verification System",
+        description=(
+            f"`{prefix}verify setup` — Auto-setup everything (roles + channels)\n"
+            f"`{prefix}verify setrole <@verified> <@unverified>` — Set roles manually\n"
+            f"`{prefix}verify setchannel #verify` — Set verify channel\n"
+            f"`{prefix}verify setlog #channel` — Set verify log channel\n"
+            f"`{prefix}verify panel` — Send verify panel to current channel\n"
+            f"`{prefix}verify status` — View current config"
+        ),
+        color=0x5865f2
+    )
+    e.set_thumbnail(url=ctx.guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=ctx.guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+@verify_group.command(name="setup")
+@commands.has_permissions(administrator=True)
+async def verify_setup(ctx):
+    """Full auto-setup: creates roles, channels, sends panel."""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+
+    guild = ctx.guild
+    gid   = guild.id
+    cfg   = _get_verify_cfg(gid)
+
+    # Progress embed
+    setup_e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Verification Setup",
+        description=(
+            "__**Setting up Verification System...**__\n\n"
+            "• Creating `Verified` role... ⏳\n"
+            "• Creating `Unverified` role... ⏳\n"
+            "• Creating `#verify-here` channel... ⏳\n"
+            "• Creating `#verify-logs` channel... ⏳\n"
+            "• Sending verification panel... ⏳"
+        ),
+        color=0x5865f2
+    )
+    setup_e.set_thumbnail(url=guild.me.display_avatar.url)
+    msg = await ctx.send(embed=setup_e)
+
+    results = {}
+
+    # ── 1. Verified role ─────────────────────────────────────────────────
+    verified_role = discord.utils.get(guild.roles, name="Verified")
+    if not verified_role:
+        try:
+            verified_role = await guild.create_role(
+                name="Verified",
+                color=discord.Color.green(),
+                reason="Empire Verification Setup"
+            )
+            results["verified"] = "<a:enabled:1483344741675569325> Created"
+        except:
+            results["verified"] = "⚠️ Failed"
+    else:
+        results["verified"] = "<a:enabled:1483344741675569325> Already exists"
+    cfg["verified_role"] = verified_role.id if verified_role else None
+    _save_verify_cfg(gid)
+    await asyncio.sleep(0.5)
+
+    # ── 2. Unverified role ────────────────────────────────────────────────
+    unverified_role = discord.utils.get(guild.roles, name="Unverified")
+    if not unverified_role:
+        try:
+            unverified_role = await guild.create_role(
+                name="Unverified",
+                color=discord.Color.red(),
+                reason="Empire Verification Setup"
+            )
+            results["unverified"] = "<a:enabled:1483344741675569325> Created"
+        except:
+            results["unverified"] = "⚠️ Failed"
+    else:
+        results["unverified"] = "<a:enabled:1483344741675569325> Already exists"
+    cfg["unverified_role"] = unverified_role.id if unverified_role else None
+    _save_verify_cfg(gid)
+    await asyncio.sleep(0.5)
+
+    # ── 3. verify-here channel ────────────────────────────────────────────
+    verify_ch = discord.utils.get(guild.text_channels, name="verify-here")
+    if not verify_ch:
+        try:
+            # Only unverified role can see it, verified cannot
+            overwrites = {
+                guild.default_role:  discord.PermissionOverwrite(view_channel=False),
+                guild.me:            discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            }
+            if unverified_role:
+                overwrites[unverified_role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=False, read_message_history=True
+                )
+            if verified_role:
+                overwrites[verified_role] = discord.PermissionOverwrite(view_channel=False)
+
+            verify_ch = await guild.create_text_channel(
+                "verify-here",
+                overwrites=overwrites,
+                topic="Click the button below to verify yourself!",
+                reason="Empire Verification Setup"
+            )
+            results["verify_ch"] = "<a:enabled:1483344741675569325> Created"
+        except:
+            results["verify_ch"] = "⚠️ Failed"
+    else:
+        results["verify_ch"] = "<a:enabled:1483344741675569325> Already exists"
+    cfg["verify_ch"] = verify_ch.id if verify_ch else None
+    _save_verify_cfg(gid)
+    await asyncio.sleep(0.5)
+
+    # ── 4. verify-logs channel ────────────────────────────────────────────
+    log_ch = discord.utils.get(guild.text_channels, name="verify-logs")
+    if not log_ch:
+        try:
+            log_overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            }
+            log_ch = await guild.create_text_channel(
+                "verify-logs",
+                overwrites=log_overwrites,
+                topic="Empire Verification logs",
+                reason="Empire Verification Setup"
+            )
+            results["log_ch"] = "<a:enabled:1483344741675569325> Created"
+        except:
+            results["log_ch"] = "⚠️ Failed"
+    else:
+        results["log_ch"] = "<a:enabled:1483344741675569325> Already exists"
+    cfg["verify_log_ch"] = log_ch.id if log_ch else None
+    _save_verify_cfg(gid)
+    await asyncio.sleep(0.5)
+
+    # ── 5. ONLY add Unverified block — don't touch existing channel permissions ──
+    # Keep all channels exactly as they are, just deny Unverified role access
+    restricted = 0
+    for ch in guild.channels:
+        try:
+            if verify_ch and ch.id == verify_ch.id:
+                continue
+            if log_ch and ch.id == log_ch.id:
+                continue
+
+            # ONLY block Unverified role — don't touch @everyone or anything else
+            if unverified_role:
+                await ch.set_permissions(unverified_role,
+                    view_channel=False,
+                    send_messages=False,
+                    read_message_history=False,
+                    reason="[Empire] Block unverified")
+
+            restricted += 1
+        except:
+            pass
+
+    results["restricted"] = f"<a:enabled:1483344741675569325> {restricted} channels restricted"
+    await asyncio.sleep(0.5)
+
+    # ── verify-here: only unverified can see, verified cannot ───────────────────
+    if verify_ch:
+        try:
+            # @everyone — hide verify-here by default
+            await verify_ch.set_permissions(guild.default_role,
+                view_channel=False,
+                reason="[Empire] verify-here hidden from everyone"
+            )
+            # Unverified — can see and read verify-here only
+            if unverified_role:
+                await verify_ch.set_permissions(unverified_role,
+                    view_channel=True,
+                    send_messages=False,
+                    read_message_history=True,
+                    reason="[Empire] verify-here for unverified"
+                )
+            # Verified — cannot see verify-here
+            if verified_role:
+                await verify_ch.set_permissions(verified_role,
+                    view_channel=False,
+                    reason="[Empire] verified dont need verify-here"
+                )
+        except:
+            pass
+
+    # ── 6. Send verify panel ─────────────────────────────────────────────
+    panel_sent = False
+    if verify_ch:
+        try:
+            panel_e = discord.Embed(
+                title="<a:antinuke:1483344748990435370> Server Verification",
+                description=(
+                    f"**Welcome to {guild.name}!**\n\n"
+                    "To gain access to the server, please verify yourself\n"
+                    "by clicking the button below.\n\n"
+                    "**Requirements:**\n"
+                    "▸ Read and follow the server rules\n"
+                    "▸ Be respectful to all members\n\n"
+                    "*Click the button below to verify!*"
+                ),
+                color=0x5865f2
+            )
+            panel_e.set_thumbnail(url=guild.me.display_avatar.url)
+            panel_e.set_footer(text=f"Empire Verification • {guild.name}", icon_url=guild.me.display_avatar.url)
+            await verify_ch.send(embed=panel_e, view=VerifyButton())
+            panel_sent = True
+            results["panel"] = "<a:enabled:1483344741675569325> Sent"
+        except:
+            results["panel"] = "⚠️ Failed"
+    else:
+        results["panel"] = "⚠️ No channel"
+
+    # ── Update embed with results ─────────────────────────────────────────
+    done_e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Verification Setup Complete",
+        description=(
+            "__**Verification System is now active!**__\n\n"
+            f"• `Verified` role: {results.get('verified','⚠️')}\n"
+            f"• `Unverified` role: {results.get('unverified','⚠️')}\n"
+            f"• `#verify-here` channel: {results.get('verify_ch','⚠️')}\n"
+            f"• `#verify-logs` channel: {results.get('log_ch','⚠️')}\n"
+            f"• Channels restricted: {results.get('restricted','⚠️')}\n"
+            f"• Verification panel: {results.get('panel','⚠️')}\n\n"
+            f"⚠️ **Important:** Make sure `Unverified` role **restricts** access to all channels!\n"
+            f"Bot role must be **above** Verified and Unverified roles."
+        ),
+        color=0x57f287,
+        timestamp=datetime.now(timezone.utc)
+    )
+    done_e.set_thumbnail(url=guild.me.display_avatar.url)
+    done_e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await msg.edit(embed=done_e)
+
+
+@verify_group.command(name="panel")
+@commands.has_permissions(administrator=True)
+async def verify_panel(ctx):
+    """Send verify panel to current channel."""
+    guild = ctx.guild
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Server Verification",
+        description=(
+            f"**Welcome to {guild.name}!**\n\n"
+            "To gain access to the server, please verify yourself\n"
+            "by clicking the button below.\n\n"
+            "**Requirements:**\n"
+            "▸ Read and follow the server rules\n"
+            "▸ Be respectful to all members\n\n"
+            "*Click the button below to verify!*"
+        ),
+        color=0x5865f2
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text=f"Empire Verification • {guild.name}", icon_url=guild.me.display_avatar.url)
+    await ctx.channel.send(embed=e, view=VerifyButton())
+    await ctx.send(embed=ok_embed("<a:enabled:1483344741675569325> Verification panel sent!"), delete_after=5)
+
+
+@verify_group.command(name="setrole")
+@commands.has_permissions(administrator=True)
+async def verify_setrole(ctx, verified: discord.Role, unverified: discord.Role):
+    gid = ctx.guild.id
+    cfg = _get_verify_cfg(gid)
+    cfg["verified_role"]   = verified.id
+    cfg["unverified_role"] = unverified.id
+    _save_verify_cfg(gid)
+    await ctx.send(embed=ok_embed(
+        f"<a:enabled:1483344741675569325> **Verified role:** {verified.mention}\n"
+        f"<a:disabled1:1483344744024248453> **Unverified role:** {unverified.mention}"
+    ))
+
+
+@verify_group.command(name="setchannel")
+@commands.has_permissions(administrator=True)
+async def verify_setchannel(ctx, channel: discord.TextChannel = None):
+    ch = channel or ctx.channel
+    gid = ctx.guild.id
+    cfg = _get_verify_cfg(gid)
+    cfg["verify_ch"] = ch.id
+    _save_verify_cfg(gid)
+    await ctx.send(embed=ok_embed(f"<a:enabled:1483344741675569325> Verify channel set to {ch.mention}"))
+
+
+@verify_group.command(name="setlog")
+@commands.has_permissions(administrator=True)
+async def verify_setlog(ctx, channel: discord.TextChannel = None):
+    ch = channel or ctx.channel
+    gid = ctx.guild.id
+    cfg = _get_verify_cfg(gid)
+    cfg["verify_log_ch"] = ch.id
+    _save_verify_cfg(gid)
+    await ctx.send(embed=ok_embed(f"<a:enabled:1483344741675569325> Verify log channel set to {ch.mention}"))
+
+
+@verify_group.command(name="status")
+@commands.has_permissions(administrator=True)
+async def verify_status(ctx):
+    guild = ctx.guild
+    cfg   = _get_verify_cfg(guild.id)
+    vr    = guild.get_role(cfg["verified_role"])   if cfg["verified_role"]   else None
+    ur    = guild.get_role(cfg["unverified_role"]) if cfg["unverified_role"] else None
+    vc    = guild.get_channel(cfg["verify_ch"])    if cfg["verify_ch"]       else None
+    lc    = guild.get_channel(cfg["verify_log_ch"])if cfg["verify_log_ch"]   else None
+
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Verification Status",
+        color=0x5865f2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.add_field(name="<a:enabled:1483344741675569325> Verified Role",   value=vr.mention  if vr else "`Not set`", inline=True)
+    e.add_field(name="<a:disabled1:1483344744024248453> Unverified Role", value=ur.mention  if ur else "`Not set`", inline=True)
+    e.add_field(name="\u200b", value="\u200b", inline=True)
+    e.add_field(name="📢 Verify Channel",  value=vc.mention  if vc else "`Not set`", inline=True)
+    e.add_field(name="<a:Moderation:1483344127071486123> Log Channel",     value=lc.mention  if lc else "`Not set`", inline=True)
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text="Empire Development™", icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+# ── Slash: /verify-setup ──────────────────────────────────────────────────────
+@bot.tree.command(name="verify-setup", description="Auto-setup the verification system")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_verify_setup(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    ctx = await bot.get_context(interaction)
+    await interaction.response.defer()
+    await verify_setup(ctx)
+
+@bot.tree.command(name="verify-panel", description="Send the verification panel here")
+@app_commands.checks.has_permissions(administrator=True)
+async def slash_verify_panel(interaction: discord.Interaction):
+    # Defer first to prevent Unknown Interaction (404)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    e = discord.Embed(
+        title="<a:antinuke:1483344748990435370> Server Verification",
+        description=(
+            f"**Welcome to {guild.name}!**\n\n"
+            "Click the button below to verify yourself and gain access to the server."
+        ),
+        color=0x5865f2
+    )
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text=f"Empire Verification • {guild.name}", icon_url=guild.me.display_avatar.url)
+    await interaction.channel.send(embed=e, view=VerifyButton())
+    await interaction.followup.send(embed=ok_embed("<a:Tick:1483344124357644350> Panel sent!"), ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ADMIN SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="admin-add", aliases=["addadmin", "adminadd"])
+async def admin_add_cmd(ctx, member: discord.Member = None):
+    """Add a bot admin (Owner only)."""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    if not member:
+        return await ctx.send(embed=err_embed("Usage: `$admin-add @user`"))
+    if member.id == ctx.guild.owner_id:
+        return await ctx.send(embed=ok_embed("Server owner is already the top admin!"))
+    if member.bot:
+        return await ctx.send(embed=err_embed("Cannot add a bot as admin."))
+
+    BOT_ADMINS[ctx.guild.id].add(member.id)
+    DB.admin_add(ctx.guild.id, member.id)
+
+    e = discord.Embed(
+        title="<a:crown:1483340832429051995> Bot Admin Added",
+        description=(
+            f"{member.mention} has been added as a **Bot Admin**!\n\n"
+            f"They can now use most bot commands.\n"
+            f"*(Antinuke setup, Automod setup & Verify setup remain Owner only)*"
+        ),
+        color=0xffd700,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.add_field(name="👤 Added by", value=ctx.author.mention, inline=True)
+    e.add_field(name="🎯 New Admin", value=member.mention, inline=True)
+    e.set_footer(text="Empire Development™", icon_url=ctx.guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+@bot.command(name="admin-remove", aliases=["removeadmin", "adminremove"])
+async def admin_remove_cmd(ctx, member: discord.Member = None):
+    """Remove a bot admin (Owner only)."""
+    if not is_owner(ctx):
+        return await ctx.send(embed=owner_only_error(), delete_after=8)
+    if not member:
+        return await ctx.send(embed=err_embed("Usage: `$admin-remove @user`"))
+
+    if member.id not in BOT_ADMINS.get(ctx.guild.id, set()):
+        return await ctx.send(embed=err_embed(f"{member.mention} is not a bot admin."))
+
+    BOT_ADMINS[ctx.guild.id].discard(member.id)
+    DB.admin_remove(ctx.guild.id, member.id)
+    e = discord.Embed(
+        title="🗑️ Bot Admin Removed",
+        description=f"{member.mention} has been **removed** from bot admins.",
+        color=0xff0000,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text="Empire Development™", icon_url=ctx.guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+@bot.command(name="admin-list", aliases=["adminlist", "listadmins"])
+async def admin_list_cmd(ctx):
+    """List all bot admins."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+
+    guild = ctx.guild
+    admins = BOT_ADMINS.get(guild.id, set())
+
+    e = discord.Embed(
+        title="<a:crown:1483340832429051995> Bot Admins",
+        color=0xffd700,
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    # Always show server owner
+    owner = guild.owner
+    lines = [f"<a:crown:1483340832429051995> {owner.mention} — `Server Owner` *(always)*"]
+
+    # Discord admins
+    discord_admins = [m for m in guild.members if m.guild_permissions.administrator and not m.bot and m.id != guild.owner_id]
+    for m in discord_admins[:10]:
+        lines.append(f"<a:antinuke:1483344748990435370> {m.mention} — `Discord Admin`")
+
+    # Bot admins
+    if admins:
+        for uid in admins:
+            m = guild.get_member(uid)
+            name = m.mention if m else f"`{uid}`"
+            lines.append(f"⭐ {name} — `Bot Admin`")
+    else:
+        lines.append("*No bot admins added yet.*\nUse `$admin-add @user` to add one.")
+
+    e.description = "\n".join(lines)
+    e.set_thumbnail(url=guild.me.display_avatar.url)
+    e.set_footer(text=f"Empire Development™ • {len(admins)} Bot Admins added", icon_url=guild.me.display_avatar.url)
+    await ctx.send(embed=e)
+
+
+# Slash versions
+@bot.tree.command(name="admin-add", description="Add a bot admin (Owner only)")
+@app_commands.describe(member="User to make a bot admin")
+async def slash_admin_add(interaction: discord.Interaction, member: discord.Member):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    if member.bot:
+        return await interaction.response.send_message(embed=err_embed("Cannot add a bot as admin."), ephemeral=True)
+    BOT_ADMINS[interaction.guild.id].add(member.id)
+    e = discord.Embed(
+        title="<a:crown:1483340832429051995> Bot Admin Added",
+        description=f"{member.mention} added as **Bot Admin**!\nThey can now use most bot commands.",
+        color=0xffd700
+    )
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="admin-remove", description="Remove a bot admin (Owner only)")
+@app_commands.describe(member="Bot admin to remove")
+async def slash_admin_remove(interaction: discord.Interaction, member: discord.Member):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(embed=owner_only_error(), ephemeral=True)
+    BOT_ADMINS[interaction.guild.id].discard(member.id)
+    await interaction.response.send_message(embed=ok_embed(f"🗑️ {member.mention} removed from bot admins."))
+
+@bot.tree.command(name="admin-list", description="List all bot admins")
+async def slash_admin_list(interaction: discord.Interaction):
+    guild = interaction.guild
+    admins = BOT_ADMINS.get(guild.id, set())
+    lines = [f"<a:crown:1483340832429051995> {guild.owner.mention} — `Server Owner`"]
+    for uid in admins:
+        m = guild.get_member(uid)
+        lines.append(f"⭐ {m.mention if m else uid} — `Bot Admin`")
+    e = discord.Embed(title="<a:crown:1483340832429051995> Bot Admins", description="\n".join(lines) or "None", color=0xffd700)
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ERROR HANDLER (anti-nuke safe)
+# ═══════════════════════════════════════════════════════════════════════════════
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(embed=err_embed("<a:disabled1:1483344744024248453> You don't have permission to use this command."), delete_after=8)
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(embed=err_embed(f"<a:disabled1:1483344744024248453> Missing argument: `{error.param.name}`"), delete_after=8)
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(embed=err_embed(f"<a:disabled1:1483344744024248453> Bad argument: {error}"), delete_after=8)
+    elif isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(embed=err_embed(f"⏳ Slow down! Try again in `{error.retry_after:.1f}s`"), delete_after=5)
+    else:
+        pass  # Silently ignore other errors to avoid leaking info
+
+
+
+@bot.command(name="authlink", aliases=["oauthlink"])
+@commands.has_permissions(administrator=True)
+async def authlink_cmd(ctx):
+    """Get the OAuth2 authorization link for members."""
+    guild = ctx.guild
+    link = f"{OAUTH_BASE_URL}/authorize?guild_id={guild.id}"
+    e = discord.Embed(
+        title="<a:arrow_flashright:1483344142062059580> OAuth2 Authorization Link",
+        description=(
+            f"Share this link with your members so they can authorize:\n\n"
+            f"**{link}**\n\n"
+            f"After they authorize, you can use `$forcejoin all` to add them back if server gets nuked."
+        ),
+        color=0x5865f2,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HIDE / UNHIDE CHANNEL SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.group(name="hide", invoke_without_command=True)
+@commands.has_permissions(manage_channels=True)
+async def hide_cmd(ctx, channel: discord.TextChannel = None):
+    """Hide a channel from @everyone."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    ch = channel or ctx.channel
+    await ch.set_permissions(ctx.guild.default_role, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} has been **hidden** from everyone.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@bot.command(name="unhide")
+@commands.has_permissions(manage_channels=True)
+async def unhide_cmd(ctx, channel: discord.TextChannel = None):
+    """Unhide a channel for @everyone."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    ch = channel or ctx.channel
+    await ch.set_permissions(ctx.guild.default_role, view_channel=True)
+    e = discord.Embed(
+        description=f"<a:enabled:1483344741675569325> {ch.mention} has been **unhidden** for everyone.",
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@hide_cmd.command(name="role")
+@commands.has_permissions(manage_channels=True)
+async def hide_role(ctx, role: discord.Role, channel: discord.TextChannel = None):
+    """Hide a channel from a specific role."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    ch = channel or ctx.channel
+    await ch.set_permissions(role, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} hidden from {role.mention}.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@hide_cmd.command(name="member")
+@commands.has_permissions(manage_channels=True)
+async def hide_member(ctx, member: discord.Member, channel: discord.TextChannel = None):
+    """Hide a channel from a specific member."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    ch = channel or ctx.channel
+    await ch.set_permissions(member, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} hidden from {member.mention}.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@hide_cmd.command(name="all")
+@commands.has_permissions(manage_channels=True)
+async def hide_all(ctx):
+    """Hide ALL channels from @everyone."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    guild = ctx.guild
+    hidden = 0
+    for ch in guild.channels:
+        try:
+            await ch.set_permissions(guild.default_role, view_channel=False)
+            hidden += 1
+        except:
+            pass
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> **{hidden} channels** hidden from everyone.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+@bot.command(name="unhideall")
+@commands.has_permissions(manage_channels=True)
+async def unhide_all(ctx):
+    """Unhide ALL channels for @everyone."""
+    if not is_bot_admin(ctx):
+        return await ctx.send(embed=bot_admin_error(), delete_after=8)
+    guild = ctx.guild
+    shown = 0
+    for ch in guild.channels:
+        try:
+            await ch.set_permissions(guild.default_role, view_channel=None)
+            shown += 1
+        except:
+            pass
+    e = discord.Embed(
+        description=f"<a:enabled:1483344741675569325> **{shown} channels** unhidden for everyone.",
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await ctx.send(embed=e)
+
+# ── Slash versions ─────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="hide", description="Hide a channel from everyone")
+@app_commands.describe(channel="Channel to hide (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_hide(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(interaction.guild.default_role, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} has been **hidden** from everyone.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="unhide", description="Unhide a channel for everyone")
+@app_commands.describe(channel="Channel to unhide (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_unhide(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(interaction.guild.default_role, view_channel=True)
+    e = discord.Embed(
+        description=f"<a:enabled:1483344741675569325> {ch.mention} has been **unhidden** for everyone.",
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="hide-role", description="Hide a channel from a specific role")
+@app_commands.describe(role="Role to hide from", channel="Channel (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_hide_role(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(role, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} hidden from {role.mention}.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="unhide-role", description="Unhide a channel for a specific role")
+@app_commands.describe(role="Role to unhide for", channel="Channel (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_unhide_role(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(role, view_channel=True)
+    e = discord.Embed(
+        description=f"<a:enabled:1483344741675569325> {ch.mention} unhidden for {role.mention}.",
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="hide-member", description="Hide a channel from a specific member")
+@app_commands.describe(member="Member to hide from", channel="Channel (default: current)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_hide_member(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel = None):
+    ch = channel or interaction.channel
+    await ch.set_permissions(member, view_channel=False)
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> {ch.mention} hidden from {member.mention}.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="hide-all", description="Hide ALL channels from everyone")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_hide_all(interaction: discord.Interaction):
+    if not is_bot_admin_interaction(interaction):
+        return await interaction.response.send_message(embed=bot_admin_error(), ephemeral=True)
+    guild = interaction.guild
+    hidden = 0
+    await interaction.response.defer()
+    for ch in guild.channels:
+        try:
+            await ch.set_permissions(guild.default_role, view_channel=False)
+            hidden += 1
+        except:
+            pass
+    e = discord.Embed(
+        description=f"<a:disabled1:1483344744024248453> **{hidden} channels** hidden from everyone.",
+        color=0xed4245
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="unhide-all", description="Unhide ALL channels for everyone")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slash_unhide_all(interaction: discord.Interaction):
+    if not is_bot_admin_interaction(interaction):
+        return await interaction.response.send_message(embed=bot_admin_error(), ephemeral=True)
+    guild = interaction.guild
+    shown = 0
+    await interaction.response.defer()
+    for ch in guild.channels:
+        try:
+            await ch.set_permissions(guild.default_role, view_channel=None)
+            shown += 1
+        except:
+            pass
+    e = discord.Embed(
+        description=f"<a:enabled:1483344741675569325> **{shown} channels** unhidden for everyone.",
+        color=0x57f287
+    )
+    e.set_footer(text="Empire Prime • bot.strengthcloud.xyz • Made by Black Belt")
+    await interaction.followup.send(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ⭐ PREMIUM FEATURES — Commands visible to all, locked behind premium gate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── In-Memory Premium Stores (bot.py copy) ───────────────────────────────────
+import random as _random
+_p_backup_store        = {}   # guild_id → backup dict
+_p_nuke_recovery       = {}   # guild_id → {enabled, _recovering}
+_p_giveaway_store      = {}   # guild_id → {msg_id: gw_data}
+_p_reaction_roles      = {}   # guild_id → {msg_id: {emoji: role_id}}
+_p_autorole_store      = {}   # guild_id → [role_ids]
+_p_welcome_store       = {}   # guild_id → config dict
+_p_autoresponder       = {}   # guild_id → {trigger: response}
+_p_sticky_msg          = {}   # channel_id → {msg_id, content}
+_p_autoreact           = {}   # guild_id → {channel_id: [emojis]}
+_p_wordreact           = {}   # guild_id → {keyword: [emojis]}
+_p_level_store         = {}   # (guild_id, user_id) → {xp, level}
+_p_level_config        = {}   # guild_id → {enabled, channel, roles}
+_p_tempvc_store        = {}   # vc_channel_id → owner_id
+_p_tempvc_config       = {}   # guild_id → hub_channel_id
+_p_snipe_store         = {}   # channel_id → {content, author, avatar, time}
+_p_editsnipe_store     = {}   # channel_id → {before, after, author, avatar, time}
+_p_poll_store          = {}   # msg_id → poll data
+_p_reminder_store      = {}   # user_id → [{when, what, ch_id}]
+_p_xp_cooldown         = {}   # (guild_id, user_id) → last_xp datetime
+
+PREMIUM_COLOR = 0xfee75c
+PREMIUM_FOOTER = f"{BOT_NAME} • bot.strengthcloud.xyz • Made by Black Belt"
+
+def _premium_embed():
+    """Standard 'buy premium' embed shown when non-premium server uses a premium command."""
+    e = discord.Embed(
+        title="<a:crown:1483340832429051995> Empire Prime — Premium Feature",
+        description=(
+            "┌──────────────────────────────┐\n"
+            "│  <a:aflamegreen:1483344066748874792>  **This is a Premium Command**  <a:aflamegreen:1483344066748874792>  │\n"
+            "└──────────────────────────────┘\n\n"
+            "> This command is **exclusively** available to **Empire Prime** servers.\n\n"
+            "<a:arrow_flashright:1483344142062059580> **Unlock Premium to get:**\n"
+            "☢️ Auto Nuke Recovery\n"
+            "💾 Server Backup & Restore\n"
+            "<a:Gift:1483344100353642497> Giveaways & Reaction Roles\n"
+            "🏆 Level / XP System\n"
+            "🤖 Auto Role & Temp VC\n"
+            "📌 Sticky Messages & Polls\n"
+            "🌟 Custom Welcome DMs\n\n"
+            "<a:Tick:1483344124357644350> **[Buy Premium → bot.strengthcloud.xyz/pricing](https://bot.strengthcloud.xyz/pricing)**"
+        ),
+        color=PREMIUM_COLOR
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    return e
+
+# In-memory premium cache — loaded on startup, updated on grant/revoke
+_PREMIUM_CACHE: set = set()
+_VIP_CACHE: set = set()  # subset of premium — VIP plan only
+
+# Premium override file — dashboard writes guild IDs here as fallback
+import pathlib as _pathlib
+_PREMIUM_FILE = _pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / "premium_guilds.txt"
+
+def _read_premium_file() -> set:
+    """Read guild IDs from premium_guilds.txt (written by dashboard)."""
+    try:
+        if _PREMIUM_FILE.exists():
+            lines = _PREMIUM_FILE.read_text(encoding='utf-8').strip().splitlines()
+            ids = set()
+            for l in lines:
+                l = l.strip()
+                if l.isdigit():
+                    ids.add(int(l))
+            return ids
+    except Exception as e:
+        print(f"[PREMIUM] Error reading premium file: {e}")
+    return set()
+
+def _write_premium_file(guild_ids: set):
+    """Write all premium guild IDs to file."""
+    try:
+        _PREMIUM_FILE.write_text("\n".join(str(g) for g in guild_ids), encoding='utf-8')
+    except: pass
+
+def _get_plan(guild_id: int) -> str:
+    """Return the plan name for a guild, or '' if not premium."""
+    srv = DB.get_premium_server(guild_id)
+    if srv and srv.get('active'):
+        return srv.get('plan_name', 'Premium')
+    return ''
+
+def _is_vip(guild_id: int) -> bool:
+    """Return True only if the server has VIP plan (includes all premium features)."""
+    if guild_id in _VIP_CACHE:
+        return True
+    plan = _get_plan(guild_id)
+    if plan == 'VIP':
+        _VIP_CACHE.add(guild_id)
+        return True
+    return False
+
+def _is_premium(guild_id: int) -> bool:
+    """Check if guild has active premium — from cache first, then DB."""
+    if guild_id in _PREMIUM_CACHE:
+        return True
+    # Cache miss — check DB directly (handles dashboard activation)
+    result = DB.is_premium_server(guild_id)
+    if result:
+        _PREMIUM_CACHE.add(guild_id)
+    return result
+
+def _refresh_premium_cache():
+    """Reload all premium guild IDs from DB + file into memory."""
+    global _PREMIUM_CACHE
+    db_servers = DB.get_all_premium_servers()
+    db_ids = {s['guild_id'] for s in db_servers}
+    file_ids = _read_premium_file()
+    _PREMIUM_CACHE = db_ids | file_ids
+    # Populate VIP cache from DB
+    global _VIP_CACHE
+    _VIP_CACHE = {s['guild_id'] for s in db_servers if s.get('plan_name') == 'VIP'}
+    # Keep file in sync with DB
+    if db_ids:
+        _write_premium_file(_PREMIUM_CACHE)
+    return _PREMIUM_CACHE
+
+def _pparse_duration(s: str):
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if not s:
+        return None
+    unit = s[-1].lower()
+    try:
+        return timedelta(seconds=int(s[:-1]) * units.get(unit, 1))
+    except:
+        return None
+
+# ─── Load premium data from DB on startup ─────────────────────────────────────
+def _load_premium_memory():
+    import json as _json
+    # Load VIP cache on startup
+    global _VIP_CACHE
+    try:
+        all_servers = DB.get_all_premium_servers()
+        _VIP_CACHE = {s['guild_id'] for s in all_servers if s.get('plan_name') == 'VIP'}
+    except: pass
+    for gid, data in DB.load_all_premium_configs().items():
+        if data.get("autorole"):
+            try: _p_autorole_store[gid] = _json.loads(data["autorole"])
+            except: pass
+        if data.get("reaction_roles"):
+            try: _p_reaction_roles[gid] = _json.loads(data["reaction_roles"])
+            except: pass
+        if data.get("welcome"):
+            try: _p_welcome_store[gid] = _json.loads(data["welcome"])
+            except: pass
+        if data.get("autoresponder"):
+            try: _p_autoresponder[gid] = _json.loads(data["autoresponder"])
+            except: pass
+        if data.get("level_config"):
+            try: _p_level_config[gid] = _json.loads(data["level_config"])
+            except: pass
+        if data.get("tempvc"):
+            try: _p_tempvc_config[gid] = int(data["tempvc"])
+            except: pass
+        if data.get("nuke_recovery"):
+            try: _p_nuke_recovery[gid] = _json.loads(data["nuke_recovery"])
+            except: pass
+        if data.get("backup"):
+            try: _p_backup_store[gid] = _json.loads(data["backup"])
+            except: pass
+        if data.get("autoreact"):
+            try: _p_autoreact[gid] = _json.loads(data["autoreact"])
+            except: pass
+        if data.get("wordreact"):
+            try: _p_wordreact[gid] = _json.loads(data["wordreact"])
+            except: pass
+        # Load sticky messages per channel
+        for key, val in data.items():
+            if key.startswith("sticky_") and val:
+                try:
+                    ch_id = int(key.replace("sticky_", ""))
+                    parsed = _json.loads(val)
+                    _p_sticky_msg[ch_id] = {"msg_id": 0, "content": parsed["content"]}
+                except: pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ☢️  NUKE RECOVERY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="nukerecovery")
+@commands.has_permissions(administrator=True)
+async def p_nuke_recovery_cmd(ctx, action: str = "status"):
+    """⭐ Premium: Enable auto nuke recovery. Usage: $nukerecovery on/off/status"""
+    import json as _j
+    gid = ctx.guild.id
+    action = action.lower()
+    if action == "on":
+        _p_nuke_recovery[gid] = {"enabled": True}
+        DB.set_premium_config(gid, "nuke_recovery", _j.dumps(_p_nuke_recovery[gid]))
+        e = discord.Embed(
+            title="<a:crown:1483340832429051995> Nuke Recovery — Activated",
+            description=(
+                "```\n"
+                "  ☢️  NUKE RECOVERY  ☢️\n"
+                "  STATUS: ██████████ ONLINE\n"
+                "```\n"
+                "<a:enabled:1483344741675569325> **Nuke Recovery is now ACTIVE!**\n\n"
+                "If your server gets **nuked**, I will automatically:\n"
+                "<a:Tick:1483344124357644350> **Unban** all banned members\n"
+                "<a:Tick:1483344124357644350> **DM invite** to all unbanned members\n"
+                "<a:Tick:1483344124357644350> **Recreate** deleted roles & channels (from backup)\n"
+                "<a:Tick:1483344124357644350> Send a full **recovery report**\n\n"
+                f"> 💡 Run `{ctx.prefix}backup create` to save a server snapshot first!"
+            ),
+            color=PREMIUM_COLOR
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+    elif action == "off":
+        _p_nuke_recovery.pop(gid, None)
+        DB.set_premium_config(gid, "nuke_recovery", _j.dumps({"enabled": False}))
+        e = discord.Embed(
+            title="<a:disabled1:1483344744024248453> Nuke Recovery — Deactivated",
+            description="Nuke Recovery has been **disabled** for this server.",
+            color=C_ERROR
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+    else:
+        cfg = _p_nuke_recovery.get(gid, {})
+        status = cfg.get("enabled", False)
+        bar = "██████████" if status else "░░░░░░░░░░"
+        e = discord.Embed(
+            title="<a:crown:1483340832429051995> Nuke Recovery — Status",
+            description=(
+                f"```\n"
+                f"  ☢️  NUKE RECOVERY  ☢️\n"
+                f"  STATUS: {bar} {'ONLINE' if status else 'OFFLINE'}\n"
+                f"```\n"
+                f"{'<a:enabled:1483344741675569325>' if status else '<a:disabled1:1483344744024248453>'} "
+                f"Status: **{'🟢 Enabled' if status else '🔴 Disabled'}**\n\n"
+                + (f"> Run `{ctx.prefix}backup create` to ensure backup is saved." if status else
+                   f"> Run `{ctx.prefix}nukerecovery on` to enable protection.")
+            ),
+            color=PREMIUM_COLOR if status else 0x2b2d31
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+@bot.tree.command(name="nukerecovery", description="⭐ Premium: Enable/disable auto nuke recovery")
+@app_commands.describe(action="on / off / status")
+@app_commands.checks.has_permissions(administrator=True)
+async def p_slash_nuke_recovery(interaction: discord.Interaction, action: str = "status"):
+    ctx_like = await bot.get_context(await interaction.channel.history(limit=1).__anext__())
+    # Just send the message directly
+    import json as _j
+    gid = interaction.guild_id
+    action = action.lower()
+    if action == "on":
+        _p_nuke_recovery[gid] = {"enabled": True}
+        DB.set_premium_config(gid, "nuke_recovery", _j.dumps(_p_nuke_recovery[gid]))
+        e = discord.Embed(title="☢️ Nuke Recovery Enabled", description="Auto-recovery activated! Run `/backup create` to save a snapshot.", color=PREMIUM_COLOR)
+    elif action == "off":
+        _p_nuke_recovery.pop(gid, None)
+        DB.set_premium_config(gid, "nuke_recovery", _j.dumps({"enabled": False}))
+        e = discord.Embed(description="❌ Nuke Recovery disabled.", color=C_ERROR)
+    else:
+        cfg = _p_nuke_recovery.get(gid, {})
+        e = discord.Embed(title="☢️ Nuke Recovery", description=f"Status: {'🟢 Enabled' if cfg.get('enabled') else '🔴 Disabled'}", color=PREMIUM_COLOR)
+    e.set_footer(text=PREMIUM_FOOTER)
+    await interaction.response.send_message(embed=e)
+
+async def _p_trigger_nuke_recovery(guild: discord.Guild, reason: str):
+    """Full nuke recovery: unban all, DM invite, restore backup."""
+    import json as _j
+    nk = _p_nuke_recovery.get(guild.id, {})
+    if not nk.get("enabled") or nk.get("_recovering"):
+        return
+    _p_nuke_recovery[guild.id]["_recovering"] = True
+
+    # Create invite
+    invite = None
+    for ch in guild.text_channels:
+        try:
+            invite = await ch.create_invite(max_age=86400, max_uses=0, reason="Empire Nuke Recovery")
+            break
+        except:
+            pass
+
+    # Unban all + DM
+    unbanned = 0
+    try:
+        async for ban_entry in guild.bans(limit=None):
+            try:
+                await guild.unban(ban_entry.user, reason="Empire Prime Nuke Recovery")
+                unbanned += 1
+                if invite:
+                    try:
+                        await ban_entry.user.send(
+                            f"⚡ **{guild.name}** was nuked but has been recovered!\n"
+                            f"You've been unbanned. Rejoin: {invite.url}"
+                        )
+                    except:
+                        pass
+                await asyncio.sleep(0.4)
+            except:
+                pass
+    except:
+        pass
+
+    # Restore from backup
+    restored_roles = 0
+    restored_channels = 0
+    backup = _p_backup_store.get(guild.id)
+    if backup:
+        for r_data in backup.get("roles", []):
+            if r_data["name"] == "@everyone":
+                continue
+            try:
+                await guild.create_role(
+                    name=r_data["name"],
+                    color=discord.Color(r_data["color"]),
+                    permissions=discord.Permissions(r_data["perms"]),
+                    hoist=r_data.get("hoist", False),
+                    mentionable=r_data.get("mentionable", False),
+                    reason="Empire Nuke Recovery"
+                )
+                restored_roles += 1
+            except:
+                pass
+        for ch_data in backup.get("channels", []):
+            try:
+                if ch_data["type"] == "text":
+                    await guild.create_text_channel(name=ch_data["name"], topic=ch_data.get("topic", ""), reason="Empire Nuke Recovery")
+                else:
+                    await guild.create_voice_channel(name=ch_data["name"], reason="Empire Nuke Recovery")
+                restored_channels += 1
+            except:
+                pass
+
+    # Send recovery report
+    for ch in guild.text_channels:
+        try:
+            e = discord.Embed(
+                title="☢️ NUKE RECOVERY COMPLETE",
+                description=(
+                    f"**Trigger:** `{reason}`\n\n"
+                    f"✅ **{unbanned}** members unbanned & reinvited\n"
+                    f"✅ **{restored_roles}** roles restored from backup\n"
+                    f"✅ **{restored_channels}** channels restored\n\n"
+                    "Empire Prime protected your server! 🛡️"
+                ),
+                color=PREMIUM_COLOR,
+                timestamp=datetime.now(timezone.utc)
+            )
+            e.set_footer(text=PREMIUM_FOOTER)
+            await ch.send(embed=e)
+            break
+        except:
+            pass
+    _p_nuke_recovery[guild.id]["_recovering"] = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  💾 SERVER BACKUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="backup")
+@commands.has_permissions(administrator=True)
+async def p_backup_cmd(ctx, action: str = "create"):
+    """⭐ Premium: Backup/restore server. Usage: $backup create/info"""
+    import json as _j
+    guild = ctx.guild
+    action = action.lower()
+
+    if action == "create":
+        # Animated loading message
+        loading_e = discord.Embed(
+            title="<a:crown:1483340832429051995> Empire Prime — Server Backup",
+            description=(
+                "```\n"
+                "  💾  BACKUP SYSTEM  💾\n"
+                "  ▓▓▓▓▓▓░░░░ SCANNING...\n"
+                "```\n"
+                "<a:clock:1483340836467900507> **Creating server backup...** Please wait."
+            ),
+            color=PREMIUM_COLOR
+        )
+        loading_e.set_footer(text=PREMIUM_FOOTER)
+        msg = await ctx.send(embed=loading_e)
+        await asyncio.sleep(1.5)
+
+        import random, string as _string
+        backup_id = ''.join(random.choices(_string.ascii_uppercase + _string.digits, k=10))
+
+        # Build channel list with category info preserved
+        _backup_channels = []
+        for c in guild.channels:
+            if isinstance(c, discord.CategoryChannel):
+                _backup_channels.append({
+                    "name": c.name,
+                    "type": "category",
+                    "position": c.position,
+                    "topic": ""
+                })
+            elif isinstance(c, discord.TextChannel):
+                _backup_channels.append({
+                    "name": c.name,
+                    "type": "text",
+                    "topic": c.topic or "",
+                    "category": c.category.name if c.category else None,
+                    "position": c.position
+                })
+            elif isinstance(c, discord.VoiceChannel):
+                _backup_channels.append({
+                    "name": c.name,
+                    "type": "voice",
+                    "topic": "",
+                    "category": c.category.name if c.category else None,
+                    "position": c.position
+                })
+
+        backup = {
+            "name": guild.name,
+            "icon": str(guild.icon) if guild.icon else None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "member_count": guild.member_count,
+            "backup_id": backup_id,
+            "owner_id": guild.owner_id,
+            "roles": [{"name": r.name, "color": r.color.value, "perms": r.permissions.value, "hoist": r.hoist, "mentionable": r.mentionable, "position": r.position} for r in guild.roles],
+            "channels": _backup_channels,
+            "emojis": [{"name": em.name, "url": str(em.url)} for em in guild.emojis]
+        }
+        _p_backup_store[guild.id] = backup
+        DB.set_premium_config(guild.id, "backup", _j.dumps(backup))
+        # Save backup by ID for cross-server import
+        DB.set_premium_config(guild.id, f"backup_id_{backup_id}", _j.dumps(backup))
+        DB.set_premium_config(guild.id, "latest_backup_id", backup_id)
+        # Also save to dedicated server_backups table
+        DB.save_server_backup(
+            backup_id=backup_id,
+            guild_id=guild.id,
+            guild_name=guild.name,
+            owner_id=guild.owner_id,
+            created_at=backup["created_at"],
+            roles_count=len(backup["roles"]),
+            channels_count=len(backup["channels"]),
+            data=_j.dumps(backup)
+        )
+
+        e = discord.Embed(
+            title="<a:crown:1483340832429051995> Empire Prime — Backup Complete",
+            description=(
+                "```\n"
+                "  💾  BACKUP SYSTEM  💾\n"
+                "  ▓▓▓▓▓▓▓▓▓▓ 100% DONE\n"
+                "```\n"
+                "<a:Tick:1483344124357644350> **Server backup saved successfully!**\n\n"
+                f"<a:Hashtag:1483344136760201380> **Server:** {guild.name}\n"
+                f"<a:arrow_white:1483335702832877578> **Roles saved:** `{len(backup['roles'])}`\n"
+                f"<a:arrow_white:1483335702832877578> **Channels saved:** `{len(backup['channels'])}`\n"
+                f"<a:arrow_white:1483335702832877578> **Emojis saved:** `{len(backup['emojis'])}`\n"
+                f"<a:arrow_white:1483335702832877578> **Members at time:** `{backup['member_count']}`\n\n"
+                f"📌 **Backup ID:** `{backup_id}`\n"
+                f"> ⚠️ Save this ID! You'll need it to import into another server.\n"
+                f"> ☢️ Run `{ctx.prefix}nukerecovery on` to enable auto-restore on nuke."
+            ),
+            color=PREMIUM_COLOR,
+            timestamp=datetime.now(timezone.utc)
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+        await msg.edit(embed=e)
+
+    elif action == "info":
+        bk = _p_backup_store.get(guild.id)
+        if not bk:
+            e = discord.Embed(
+                title="<a:disabled1:1483344744024248453> No Backup Found",
+                description=f"This server doesn't have a backup yet.\nRun `{ctx.prefix}backup create` to save one now.",
+                color=C_ERROR
+            )
+            e.set_footer(text=PREMIUM_FOOTER)
+            return await ctx.send(embed=e)
+        e = discord.Embed(
+            title="<a:crown:1483340832429051995> Empire Prime — Backup Info",
+            description=(
+                "```\n"
+                "  💾  BACKUP SYSTEM  💾\n"
+                "  SNAPSHOT FOUND ✓\n"
+                "```\n"
+                f"<a:Hashtag:1483344136760201380> **Server:** {bk['name']}\n"
+                f"<a:clock:1483340836467900507> **Created:** `{bk['created_at'][:10]}`\n"
+                f"<a:arrow_white:1483335702832877578> **Members (at backup):** `{bk['member_count']}`\n"
+                f"<a:arrow_white:1483335702832877578> **Roles:** `{len(bk['roles'])}`\n"
+                f"<a:arrow_white:1483335702832877578> **Channels:** `{len(bk['channels'])}`\n"
+                f"<a:arrow_white:1483335702832877578> **Emojis:** `{len(bk['emojis'])}`"
+            ),
+            color=PREMIUM_COLOR
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  📥 SERVER IMPORT — Import backup from any server (Owner Only, Premium)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="importbackup", aliases=["serverimport", "importserver"])
+async def p_importbackup_cmd(ctx, backup_id: str = None):
+    """⭐ Premium Owner Only: Import a backup by ID into this server. $importbackup <backup_id>"""
+    # Only server owner can use this
+    if ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send(embed=discord.Embed(
+            title="<a:crown:1483340832429051995> Owner Only!",
+            description="Only the **Server Owner** can use this command.\nThis is a powerful feature — importing a backup is restricted to the owner.",
+            color=0xff0000
+        ))
+    if not backup_id:
+        return await ctx.send(embed=discord.Embed(
+            description=(
+                f"<a:disabled1:1483344744024248453> **Backup ID is required!**\n\n"
+                f"**Usage:** `{ctx.prefix}importbackup <backup_id>`\n"
+                f"**Example:** `{ctx.prefix}importbackup ABC1234XYZ`\n\n"
+                f"📌 Backup ID is shown after running `{ctx.prefix}backup create`.\n"
+                f"🔍 View all your backups: `{ctx.prefix}listbackups`"
+            ),
+            color=0xed4245
+        ))
+    import json as _j
+    # Search backup_id in dedicated server_backups table first (fast)
+    backup_row = DB.get_backup_by_id(backup_id)
+    backup_data = None
+    source_guild_id = None
+    if backup_row:
+        try:
+            backup_data = _j.loads(backup_row["data"])
+            source_guild_id = backup_row["guild_id"]
+        except: pass
+
+    # Fallback: search premium_config (legacy backups)
+    if not backup_data:
+        all_configs = DB.load_all_premium_configs()
+        for gid, configs in all_configs.items():
+            key = f"backup_id_{backup_id}"
+            if key in configs:
+                try:
+                    backup_data = _j.loads(configs[key])
+                    source_guild_id = gid
+                    break
+                except: pass
+
+    if not backup_data:
+        return await ctx.send(embed=discord.Embed(
+            title="<a:disabled1:1483344744024248453> Backup Not Found",
+            description=(
+                f"Backup ID `{backup_id}` was not found!\n\n"
+                f"**Possible reasons:**\n"
+                f"▸ Wrong ID — please double check\n"
+                f"▸ Backup was from a different bot instance\n"
+                f"▸ Backup was deleted\n\n"
+                f"💡 Use `{ctx.prefix}listbackups` to see your backup IDs."
+            ),
+            color=0xed4245
+        ))
+
+    # Confirm before importing
+    confirm_e = discord.Embed(
+        title="📥 Confirm Server Import",
+        description=(
+            f"This backup is from **{backup_data.get('name', 'Unknown')}** server.\n\n"
+            f"<a:arrow_white:1483335702832877578> **Roles:** `{len(backup_data.get('roles', []))}` roles will be imported\n"
+            f"<a:arrow_white:1483335702832877578> **Channels:** `{len(backup_data.get('channels', []))}` channels will be imported\n"
+            f"<a:clock:1483340836467900507> **Backup Date:** `{backup_data.get('created_at', 'Unknown')[:10]}`\n\n"
+            f"⚠️ **ALL existing channels, categories and roles will be DELETED first**, then the backup will be restored exactly as it was.\n"
+            f"Type `confirm` within 30 seconds to proceed."
+        ),
+        color=0xffa500
+    )
+    confirm_e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=confirm_e)
+
+    def check(m):
+        return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id and m.content.lower() == "confirm"
+
+    try:
+        await bot.wait_for("message", check=check, timeout=30.0)
+    except asyncio.TimeoutError:
+        return await ctx.send(embed=discord.Embed(description="❌ Import cancelled — timed out.", color=0xed4245))
+
+    # Start import
+    loading_e = discord.Embed(
+        title="📥 Importing Backup...",
+        description=(
+            "```\n"
+            "  📥  SERVER IMPORT  📥\n"
+            "  ▓▓▓▓▓▓░░░░ IMPORTING...\n"
+            "```\n"
+            "<a:clock:1483340836467900507> **Deleting existing channels, categories and roles...** Please wait."
+        ),
+        color=PREMIUM_COLOR
+    )
+    loading_e.set_footer(text=PREMIUM_FOOTER)
+    status_msg = await ctx.send(embed=loading_e)
+
+    guild = ctx.guild
+    roles_created = 0
+    channels_created = 0
+    errors = []
+
+    # ── STEP 1: Delete ALL existing channels and categories ──────────────────
+    for ch in list(guild.channels):
+        if ch.id == ctx.channel.id:
+            continue  # Keep current channel so we can send final result
+        try:
+            await ch.delete(reason=f"Empire Prime Server Import — clearing before restore (Backup ID: {backup_id})")
+            await asyncio.sleep(0.3)
+        except Exception as ex:
+            errors.append(f"Delete channel `{ch.name}`: {ex}")
+
+    # ── STEP 2: Delete ALL existing roles (skip @everyone, managed, bot roles) ──
+    bot_member = guild.get_member(bot.user.id)
+    bot_top_role_pos = bot_member.top_role.position if bot_member else 0
+    for role in list(guild.roles):
+        if role.is_default() or role.managed or role.position >= bot_top_role_pos:
+            continue
+        try:
+            await role.delete(reason=f"Empire Prime Server Import — clearing before restore (Backup ID: {backup_id})")
+            await asyncio.sleep(0.3)
+        except Exception as ex:
+            errors.append(f"Delete role `{role.name}`: {ex}")
+
+    # Update loading message
+    loading_e.description = (
+        "```\n"
+        "  📥  SERVER IMPORT  📥\n"
+        "  ▓▓▓▓▓▓▓░░░ RESTORING...\n"
+        "```\n"
+        "<a:clock:1483340836467900507> **Creating roles and channels from backup...** Please wait."
+    )
+    await status_msg.edit(embed=loading_e)
+
+    # ── STEP 3: Restore Roles (sorted by position — lowest first = bottom of list) ──
+    sorted_roles = sorted(backup_data.get("roles", []), key=lambda r: r.get("position", 0))
+    for role_data in sorted_roles:
+        if role_data["name"] in ("@everyone",):
+            continue
+        try:
+            await guild.create_role(
+                name=role_data["name"],
+                color=discord.Color(role_data.get("color", 0)),
+                hoist=role_data.get("hoist", False),
+                mentionable=role_data.get("mentionable", False),
+                reason=f"Empire Prime Server Import — Backup ID: {backup_id}"
+            )
+            roles_created += 1
+            await asyncio.sleep(0.4)
+        except Exception as ex:
+            errors.append(f"Role `{role_data['name']}`: {ex}")
+
+    # ── STEP 4: Restore Categories (sorted by position) ──────────────────────
+    category_map = {}  # category_name_lower → CategoryChannel
+    sorted_channels = sorted(backup_data.get("channels", []), key=lambda c: c.get("position", 0))
+
+    for ch_data in sorted_channels:
+        if ch_data.get("type") != "category":
+            continue
+        try:
+            new_cat = await guild.create_category(
+                name=ch_data["name"],
+                reason=f"Empire Prime Server Import — Backup ID: {backup_id}"
+            )
+            category_map[ch_data["name"].lower()] = new_cat
+            channels_created += 1
+            await asyncio.sleep(0.4)
+        except Exception as ex:
+            errors.append(f"Category `{ch_data['name']}`: {ex}")
+
+    # ── STEP 5: Restore Text/Voice channels in correct order inside categories ──
+    for ch_data in sorted_channels:
+        ch_type = ch_data.get("type", "text")
+        if ch_type == "category":
+            continue
+        parent_cat = None
+        if ch_data.get("category"):
+            parent_cat = category_map.get(ch_data["category"].lower())
+        try:
+            if ch_type == "voice":
+                await guild.create_voice_channel(
+                    name=ch_data["name"],
+                    category=parent_cat,
+                    reason=f"Empire Prime Server Import — Backup ID: {backup_id}"
+                )
+            else:
+                await guild.create_text_channel(
+                    name=ch_data["name"],
+                    topic=ch_data.get("topic", ""),
+                    category=parent_cat,
+                    reason=f"Empire Prime Server Import — Backup ID: {backup_id}"
+                )
+            channels_created += 1
+            await asyncio.sleep(0.4)
+        except Exception as ex:
+            errors.append(f"Channel `{ch_data['name']}`: {ex}")
+
+    err_text = f"\n⚠️ **{len(errors)} errors** (missing permissions or rate limit)" if errors else "\n✅ **No errors!**"
+    result_e = discord.Embed(
+        title="✅ Server Import Complete!",
+        description=(
+            "```\n"
+            "  📥  SERVER IMPORT  📥\n"
+            "  ▓▓▓▓▓▓▓▓▓▓ 100% DONE\n"
+            "```\n"
+            f"<a:Tick:1483344124357644350> **Import successful from `{backup_data.get('name', 'Unknown')}`!**\n\n"
+            f"<a:arrow_white:1483335702832877578> **Roles created:** `{roles_created}`\n"
+            f"<a:arrow_white:1483335702832877578> **Channels created:** `{channels_created}`\n"
+            f"📌 **Backup ID used:** `{backup_id}`"
+            f"{err_text}"
+        ),
+        color=PREMIUM_COLOR,
+        timestamp=datetime.now(timezone.utc)
+    )
+    result_e.set_footer(text=PREMIUM_FOOTER)
+    await status_msg.edit(embed=result_e)
+
+
+@bot.command(name="listbackups", aliases=["mybackups", "backuplist"])
+async def p_listbackups_cmd(ctx):
+    """⭐ Premium Owner Only: List all backup IDs for this server. $listbackups"""
+    if ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send(embed=discord.Embed(
+            title="<a:crown:1483340832429051995> Owner Only!",
+            description="Only the **Server Owner** can view backup IDs.",
+            color=0xff0000
+        ))
+    import json as _j
+    # Use dedicated server_backups table
+    backups = DB.get_backups_by_guild(ctx.guild.id)
+
+    # Fallback: also check premium_config for legacy backups
+    if not backups:
+        configs = DB.load_all_premium_configs().get(ctx.guild.id, {})
+        for key, val in configs.items():
+            if key.startswith("backup_id_"):
+                bid = key.replace("backup_id_", "")
+                try:
+                    bdata = _j.loads(val)
+                    backups.append({
+                        "backup_id": bid,
+                        "guild_name": bdata.get("name", "Unknown"),
+                        "created_at": bdata.get("created_at", "")[:10],
+                        "roles_count": len(bdata.get("roles", [])),
+                        "channels_count": len(bdata.get("channels", []))
+                    })
+                except: pass
+
+    if not backups:
+        return await ctx.send(embed=discord.Embed(
+            description=(
+                f"<a:disabled1:1483344744024248453> **No backups found!**\n\n"
+                f"Create a backup first: `{ctx.prefix}backup create`"
+            ),
+            color=0xed4245
+        ))
+
+    desc = "**Use these IDs to import into another server:**\n\n"
+    for b in backups[-10:]:  # Last 10 backups
+        bid = b.get("backup_id") or b.get("id", "?")
+        bname = b.get("guild_name") or b.get("name", "Unknown")
+        bdate = (b.get("created_at") or b.get("date", ""))[:10]
+        broles = b.get("roles_count") or b.get("roles", 0)
+        bchans = b.get("channels_count") or b.get("channels", 0)
+        desc += f"📌 **ID:** `{bid}`\n"
+        desc += f"   ▸ Server: {bname} | Date: {bdate}\n"
+        desc += f"   ▸ Roles: `{broles}` | Channels: `{bchans}`\n\n"
+
+    e = discord.Embed(
+        title="💾 Your Backup IDs",
+        description=desc,
+        color=PREMIUM_COLOR
+    )
+    e.add_field(
+        name="📥 Import Command",
+        value=f"`{ctx.prefix}importbackup <backup_id>`",
+        inline=False
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🎁 GIVEAWAY SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _p_end_giveaway(gid: int, msg_id: str, gw: dict):
+    _p_giveaway_store.get(gid, {})[msg_id]["ended"] = True
+    guild = bot.get_guild(gid)
+    if not guild:
+        return
+    ch = guild.get_channel(gw["channel_id"])
+    if not ch:
+        return
+    try:
+        msg = await ch.fetch_message(int(msg_id))
+        reaction = discord.utils.get(msg.reactions, emoji="🎁")
+        users = [u async for u in reaction.users() if not u.bot] if reaction else []
+    except:
+        users = []
+
+    if not users:
+        e = discord.Embed(title="🎁 Giveaway Ended — No Winners", description=f"**Prize:** {gw['prize']}\nNo valid entries.", color=C_ERROR)
+    else:
+        winners = _random.sample(users, min(gw.get("winners", 1), len(users)))
+        wins_str = " ".join(w.mention for w in winners)
+        e = discord.Embed(title="🎁 Giveaway Ended!", description=f"**Prize:** {gw['prize']}\n**Winner(s):** {wins_str}", color=PREMIUM_COLOR)
+        await ch.send(f"🎉 Congratulations {wins_str}! You won **{gw['prize']}**!")
+    e.set_footer(text=PREMIUM_FOOTER)
+    try:
+        await msg.edit(embed=e)
+    except:
+        await ch.send(embed=e)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🏆 LEVEL SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="rank")
+async def p_rank(ctx, member: discord.Member = None):
+    """⭐ Premium: Check XP rank. Usage: $rank [@member]"""
+    member = member or ctx.author
+    data = _p_level_store.get((ctx.guild.id, member.id), {"xp": 0, "level": 0})
+    lvl = data["level"]
+    xp = data["xp"]
+    xp_needed = 100 * (lvl + 1)
+    percent = xp / xp_needed
+    filled = int(percent * 12)
+    empty = 12 - filled
+
+    # Stylish animated progress bar using custom emojis
+    BAR_FULL  = "🟦"
+    BAR_EMPTY = "⬛"
+    bar = BAR_FULL * filled + BAR_EMPTY * empty
+
+    # Rank title based on level
+    if lvl == 0:
+        rank_title = "🌱 Newcomer"
+    elif lvl < 5:
+        rank_title = "⚡ Rising Star"
+    elif lvl < 10:
+        rank_title = "🔥 Pro Member"
+    elif lvl < 20:
+        rank_title = "💎 Elite"
+    else:
+        rank_title = "👑 Legend"
+
+    e = discord.Embed(
+        title=f"🏆 {member.display_name}'s Rank",
+        color=PREMIUM_COLOR
+    )
+    e.add_field(name="🎖️ Rank Title", value=rank_title, inline=True)
+    e.add_field(name="📊 Level", value=f"**{lvl}**", inline=True)
+    e.add_field(name="✨ XP", value=f"`{xp}` / `{xp_needed}`", inline=True)
+    e.add_field(
+        name=f"📈 Progress  —  {int(percent * 100)}%",
+        value=f"{bar}",
+        inline=False
+    )
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+@bot.command(name="leaderboard", aliases=["xlb"])
+async def p_leaderboard(ctx):
+    """⭐ Premium: XP leaderboard. Usage: $leaderboard"""
+    gid = ctx.guild.id
+    guild_data = sorted(
+        [(k[1], v) for k, v in _p_level_store.items() if k[0] == gid],
+        key=lambda x: (x[1]["level"], x[1]["xp"]), reverse=True
+    )
+    medals = ["🥇", "🥈", "🥉"]
+    desc = ""
+    for i, (uid, data) in enumerate(guild_data[:10]):
+        medal = medals[i] if i < 3 else f"**#{i+1}**"
+        member = ctx.guild.get_member(uid)
+        name = member.display_name if member else f"User {uid}"
+        desc += f"{medal} {name} — Lvl **{data['level']}** ({data['xp']} XP)\n"
+    e = discord.Embed(title="🏆 XP Leaderboard", description=desc or "No XP data yet.", color=PREMIUM_COLOR)
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+@bot.command(name="setlevel")
+@commands.has_permissions(administrator=True)
+async def p_setlevel(ctx, action: str, *, value: str = ""):
+    """⭐ Premium: Configure level system. Usage: $setlevel on/off/channel/addrole"""
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_level_config:
+        _p_level_config[gid] = {"enabled": False, "channel": None, "roles": {}}
+    if action == "on":
+        _p_level_config[gid]["enabled"] = True
+        DB.set_premium_config(gid, "level_config", _j.dumps(_p_level_config[gid]))
+
+        # Auto-create default level roles — also re-create if deleted
+        existing_roles = _p_level_config[gid].get("roles", {})
+        default_levels = [1, 5, 10, 20, 50]
+        level_names  = {1: "🌱 Level 1",  5: "⚡ Level 5",  10: "🔥 Level 10", 20: "💎 Level 20", 50: "👑 Level 50"}
+        level_colors = {1: 0x57f287,      5: 0xfee75c,      10: 0xff7300,      20: 0x00d4ff,      50: 0xffd700}
+        created = []
+        skipped = []
+
+        # Find @everyone position so we place level roles above it
+        everyone_pos = ctx.guild.get_role(ctx.guild.id)
+        base_pos = (everyone_pos.position + 1) if everyone_pos else 1
+
+        for i, lvl in enumerate(default_levels):
+            stored_id = existing_roles.get(str(lvl))
+            # Check if the role actually exists in guild (not just in DB)
+            actual_role = ctx.guild.get_role(int(stored_id)) if stored_id else None
+            if actual_role:
+                skipped.append(f"Level **{lvl}** → {actual_role.mention} *(exists)*")
+                continue
+            # Role was deleted or never created — make a new one
+            try:
+                new_role = await ctx.guild.create_role(
+                    name=level_names[lvl],
+                    color=discord.Color(level_colors[lvl]),
+                    hoist=True,
+                    mentionable=False,
+                    permissions=discord.Permissions.none(),
+                    reason="Empire Prime — Auto level role"
+                )
+                try:
+                    await new_role.edit(position=base_pos + i)
+                except: pass
+                _p_level_config[gid]["roles"][str(lvl)] = new_role.id
+                created.append(f"Level **{lvl}** → {new_role.mention} ✅")
+            except Exception as re_err:
+                created.append(f"Level **{lvl}** → ❌ Failed (`{re_err}`)")
+
+        DB.set_premium_config(gid, "level_config", _j.dumps(_p_level_config[gid]))
+
+        all_lines = created + skipped
+        roles_display = "\n".join(all_lines) if all_lines else "No roles."
+        e = discord.Embed(title="✅ Level System Enabled", color=C_SUCCESS)
+        e.add_field(name="📋 Level Roles", value=roles_display, inline=False)
+        e.add_field(name="ℹ️ Note", value="These roles are display-only — no extra permissions granted.", inline=False)
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+    elif action == "off":
+        _p_level_config[gid]["enabled"] = False
+        DB.set_premium_config(gid, "level_config", _j.dumps(_p_level_config[gid]))
+        await ctx.send(embed=discord.Embed(description="❌ Level system **disabled**.", color=C_ERROR))
+    elif action == "channel" and ctx.message.channel_mentions:
+        _p_level_config[gid]["channel"] = ctx.message.channel_mentions[0].id
+        DB.set_premium_config(gid, "level_config", _j.dumps(_p_level_config[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Level-up announcements → {ctx.message.channel_mentions[0].mention}", color=C_SUCCESS))
+    elif action == "addrole" and ctx.message.role_mentions:
+        parts = value.split()
+        try:
+            lvl = int(parts[0])
+            role = ctx.message.role_mentions[0]
+            _p_level_config[gid]["roles"][str(lvl)] = role.id
+            DB.set_premium_config(gid, "level_config", _j.dumps(_p_level_config[gid]))
+            await ctx.send(embed=discord.Embed(description=f"✅ Level **{lvl}** reward → {role.mention}", color=C_SUCCESS))
+        except:
+            await ctx.send(f"❌ Usage: `{ctx.prefix}setlevel addrole <level> @role`")
+    else:
+        cfg = _p_level_config.get(gid, {})
+        status = "🟢 Enabled" if cfg.get("enabled") else "🔴 Disabled"
+        ch_id = cfg.get("channel")
+        ch_mention = f"<#{ch_id}>" if ch_id else "Not set"
+        roles_str = "\n".join(f"Level {lvl} → <@&{rid}>" for lvl, rid in cfg.get("roles", {}).items()) or "None"
+        e = discord.Embed(title="🏆 Level System Config", color=PREMIUM_COLOR)
+        e.add_field(name="Status", value=status, inline=True)
+        e.add_field(name="Announce Channel", value=ch_mention, inline=True)
+        e.add_field(name="Level Roles", value=roles_str, inline=False)
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🎭 REACTION ROLES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="rr")
+@commands.has_permissions(manage_roles=True)
+async def p_rr(ctx, action: str, *, args: str = ""):
+    """⭐ Premium: Reaction roles.
+    Usage:
+      $rr add <msg_id> <emoji1> @role1 [emoji2 @role2 ...]
+      $rr remove <msg_id> <emoji>
+      $rr list
+    """
+    import json as _j
+    import re as _re
+    gid = ctx.guild.id
+    if gid not in _p_reaction_roles:
+        _p_reaction_roles[gid] = {}
+
+    if action == "add":
+        tokens = args.split()
+        # Support reply — if replying to a message, use that as target
+        if ctx.message.reference and ctx.message.reference.message_id:
+            reply_id = str(ctx.message.reference.message_id)
+            # tokens are all emoji+role pairs (no msg_id prefix needed)
+            if tokens and not tokens[0].isdigit():
+                tokens = [reply_id] + tokens
+            elif not tokens:
+                return await ctx.send(embed=err_embed("Reply to a message and provide emoji + role.\nExample: Reply to msg → `$rr add 🎉 @Member`"))
+            else:
+                tokens = [reply_id] + tokens
+        if not tokens:
+            return await ctx.send(embed=err_embed(
+                f"Usage: `{ctx.prefix}rr add <msg_id> <emoji> @role`\nOR reply to a message: `{ctx.prefix}rr add 🎉 @Member`"
+            ))
+        msg_id = tokens[0]
+        if not msg_id.isdigit():
+            return await ctx.send(embed=err_embed(
+                f"Invalid message ID: `{msg_id}`\nRight-click the message → **Copy Message ID** and paste it.\nOR **reply** to the message and use `{ctx.prefix}rr add 🎉 @Member`"
+            ))
+
+        # Parse emoji+role pairs: tokens after msg_id, pair each non-mention token with next role mention
+        role_mentions = ctx.message.role_mentions
+        remaining = tokens[1:]
+        emoji_role_pairs = []
+        role_idx = 0
+        for tok in remaining:
+            if _re.match(r"<@&\d+>", tok):
+                continue  # skip role mention tokens, handled by index
+            else:
+                # emoji token — pair with next role mention
+                if role_idx < len(role_mentions):
+                    emoji_role_pairs.append((tok, role_mentions[role_idx]))
+                    role_idx += 1
+
+        if not emoji_role_pairs:
+            return await ctx.send(embed=err_embed(
+                f"Please specify at least one emoji and role.\nUsage: `{ctx.prefix}rr add {msg_id} 🎉 @Member`"
+            ))
+
+        # Fetch target message from ANY channel in guild
+        target_msg = None
+        for ch in ctx.guild.text_channels:
+            try:
+                target_msg = await ch.fetch_message(int(msg_id))
+                break
+            except:
+                pass
+
+        if str(msg_id) not in _p_reaction_roles[gid]:
+            _p_reaction_roles[gid][str(msg_id)] = {}
+
+        added_lines = []
+        for emoji_tok, role in emoji_role_pairs:
+            _p_reaction_roles[gid][str(msg_id)][emoji_tok] = role.id
+            if target_msg:
+                try:
+                    await target_msg.add_reaction(emoji_tok)
+                except:
+                    pass
+            added_lines.append(f"{emoji_tok} → {role.mention}")
+
+        DB.set_premium_config(gid, "reaction_roles", _j.dumps(_p_reaction_roles[gid]))
+
+        ch_info = f"<#{target_msg.channel.id}>" if target_msg else "*(message not found — reaction not added)*"
+        e = discord.Embed(title="<a:Tick:1483344124357644350> Reaction Roles Set!", color=C_SUCCESS)
+        e.add_field(name="📌 Message", value=f"`{msg_id}` in {ch_info}", inline=False)
+        e.add_field(name="🎭 Mappings", value="\n".join(added_lines), inline=False)
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+    elif action == "remove":
+        tokens = args.split()
+        if len(tokens) < 2:
+            return await ctx.send(f"❌ Usage: `{ctx.prefix}rr remove <msg_id> <emoji>`")
+        msg_id, emoji = tokens[0], tokens[1]
+        _p_reaction_roles[gid].get(str(msg_id), {}).pop(emoji, None)
+        DB.set_premium_config(gid, "reaction_roles", _j.dumps(_p_reaction_roles[gid]))
+        await ctx.send(embed=discord.Embed(description="✅ Reaction role removed.", color=C_SUCCESS))
+
+    elif action == "list":
+        desc = ""
+        for mid, emojis in _p_reaction_roles.get(gid, {}).items():
+            for em, rid in emojis.items():
+                r = ctx.guild.get_role(rid)
+                desc += f"Msg `{mid}` — {em} → {r.mention if r else rid}\n"
+        e = discord.Embed(title="🎭 Reaction Roles", description=desc or "None set.", color=PREMIUM_COLOR)
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ⚡ AUTO REACT — Auto-add reactions to every message in a channel
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="autoreact")
+@commands.has_permissions(manage_channels=True)
+async def p_autoreact(ctx, action: str = "help", channel: discord.TextChannel = None, *, emojis: str = ""):
+    """Auto-react to every message in a channel.
+    Usage:
+      $autoreact set #channel 👍 ❤️   — Set emojis for channel
+      $autoreact remove #channel       — Remove autoreact from channel
+      $autoreact list                  — Show all autoreact channels
+    """
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_autoreact:
+        _p_autoreact[gid] = {}
+
+    if action == "set":
+        if not channel:
+            return await ctx.send(embed=err_embed(f"Usage: `{ctx.prefix}autoreact set #channel 👍 ❤️`"))
+        if not emojis:
+            return await ctx.send(embed=err_embed("Please provide at least one emoji."))
+        emoji_list = emojis.split()
+        _p_autoreact[gid][str(channel.id)] = emoji_list
+        DB.set_premium_config(gid, "autoreact", _j.dumps(_p_autoreact[gid]))
+        e = discord.Embed(
+            title="⚡ Auto-React Set!",
+            description=f"Channel: {channel.mention}\nEvery message will get: {' '.join(emoji_list)}",
+            color=C_SUCCESS
+        )
+        await ctx.send(embed=e)
+
+    elif action == "remove":
+        if not channel:
+            return await ctx.send(embed=err_embed(f"Usage: `{ctx.prefix}autoreact remove #channel`"))
+        _p_autoreact[gid].pop(str(channel.id), None)
+        DB.set_premium_config(gid, "autoreact", _j.dumps(_p_autoreact[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Auto-react removed from {channel.mention}", color=C_SUCCESS))
+
+    elif action == "list":
+        if not _p_autoreact.get(gid):
+            return await ctx.send(embed=discord.Embed(description="No auto-react channels set.", color=C_WARN))
+        desc = ""
+        for ch_id, ems in _p_autoreact[gid].items():
+            ch = ctx.guild.get_channel(int(ch_id))
+            desc += f"{ch.mention if ch else ch_id} — {' '.join(ems)}\n"
+        await ctx.send(embed=discord.Embed(title="⚡ Auto-React Channels", description=desc, color=PREMIUM_COLOR))
+
+    else:
+        await ctx.send(embed=discord.Embed(
+            title="⚡ Auto-React",
+            description=(
+                f"`{ctx.prefix}autoreact set #channel 👍 ❤️` — Set emojis\n"
+                f"`{ctx.prefix}autoreact remove #channel` — Remove\n"
+                f"`{ctx.prefix}autoreact list` — Show all"
+            ),
+            color=C_INFO
+        ))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  💬 WORD REACT — Auto-react when message contains a keyword
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="wordreact", aliases=["wr"])
+@commands.has_permissions(manage_channels=True)
+async def p_wordreact(ctx, action: str = "help", keyword: str = None, *, emojis: str = ""):
+    """Auto-react when a message contains a keyword.
+    Usage:
+      $wordreact add hii 👍 ❤️   — React with emojis when someone says "hii"
+      $wordreact remove hii       — Remove word react
+      $wordreact list             — Show all word reacts
+    """
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_wordreact:
+        _p_wordreact[gid] = {}
+
+    if action == "add":
+        if not keyword:
+            return await ctx.send(embed=err_embed(f"Usage: `{ctx.prefix}wordreact add <word> 👍 ❤️`\nExample: `{ctx.prefix}wr add hii 🎉 👍`"))
+        if not emojis:
+            return await ctx.send(embed=err_embed(f"Please provide at least one emoji after the keyword.\nExample: `{ctx.prefix}wr add hii 🎉 👍`"))
+        # Filter only emojis — skip mentions and plain text
+        import re as _re
+        all_tokens = emojis.split()
+        emoji_list = [t for t in all_tokens if not _re.match(r"<@[!&]?\d+>", t) and not t.startswith("@")]
+        # Remove duplicates while preserving order
+        seen = set()
+        emoji_list = [e for e in emoji_list if not (e in seen or seen.add(e))]
+        if not emoji_list:
+            return await ctx.send(embed=err_embed(f"No valid emojis found!\nExample: `{ctx.prefix}wr add hii 🎉 👍`"))
+        _p_wordreact[gid][keyword.lower()] = emoji_list
+        DB.set_premium_config(gid, "wordreact", _j.dumps(_p_wordreact[gid]))
+        e = discord.Embed(
+            title="💬 Word React Set!",
+            description=f"Keyword: `{keyword}`\nReactions: {' '.join(emoji_list)}\n\nAnyone types `{keyword}` → bot reacts with {' '.join(emoji_list)}",
+            color=C_SUCCESS
+        )
+        await ctx.send(embed=e)
+
+    elif action == "remove":
+        if not keyword:
+            return await ctx.send(embed=err_embed(f"Usage: `{ctx.prefix}wordreact remove <word>`"))
+        _p_wordreact[gid].pop(keyword.lower(), None)
+        DB.set_premium_config(gid, "wordreact", _j.dumps(_p_wordreact[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Word react for `{keyword}` removed.", color=C_SUCCESS))
+
+    elif action == "list":
+        if not _p_wordreact.get(gid):
+            return await ctx.send(embed=discord.Embed(description="No word reacts set.", color=C_WARN))
+        desc = ""
+        for word, ems in _p_wordreact[gid].items():
+            desc += f"`{word}` — {' '.join(ems)}\n"
+        await ctx.send(embed=discord.Embed(title="💬 Word Reacts", description=desc, color=PREMIUM_COLOR))
+
+    else:
+        await ctx.send(embed=discord.Embed(
+            title="💬 Word React",
+            description=(
+                f"`{ctx.prefix}wordreact add <word> 👍 ❤️` — React on keyword\n"
+                f"`{ctx.prefix}wr add hii 🎉` — Short alias\n"
+                f"`{ctx.prefix}wordreact remove <word>` — Remove\n"
+                f"`{ctx.prefix}wordreact list` — Show all"
+            ),
+            color=C_INFO
+        ))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🤖 AUTO ROLE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="autorole")
+@commands.has_permissions(manage_roles=True)
+async def p_autorole(ctx, action: str, role: discord.Role = None):
+    """⭐ Premium: Auto-assign roles on join. Usage: $autorole add/remove/list @role"""
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_autorole_store:
+        _p_autorole_store[gid] = []
+    if action == "add":
+        if not role: return await ctx.send("❌ Specify a role.")
+        if role.id not in _p_autorole_store[gid]:
+            _p_autorole_store[gid].append(role.id)
+            DB.set_premium_config(gid, "autorole", _j.dumps(_p_autorole_store[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ {role.mention} will be auto-given on join.", color=C_SUCCESS))
+    elif action == "remove":
+        if not role: return await ctx.send("❌ Specify a role.")
+        _p_autorole_store[gid] = [r for r in _p_autorole_store[gid] if r != role.id]
+        DB.set_premium_config(gid, "autorole", _j.dumps(_p_autorole_store[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ {role.mention} removed from autorole.", color=C_SUCCESS))
+    elif action == "list":
+        roles = [ctx.guild.get_role(r) for r in _p_autorole_store.get(gid, [])]
+        roles = [r for r in roles if r]
+        desc = "\n".join(r.mention for r in roles) or "No autoroles set."
+        await ctx.send(embed=discord.Embed(title="🤖 Auto Roles", description=desc, color=PREMIUM_COLOR))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  📊 POLLS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="poll")
+@commands.has_permissions(manage_messages=True)
+async def p_poll(ctx, duration: str, *, question_and_options: str):
+    """⭐ Premium: Create a poll. Usage: $poll 1h Question | Option1 | Option2"""
+    td = _pparse_duration(duration)
+    if not td:
+        return await ctx.send("❌ Invalid duration. Use `10m`, `1h`, `2d`.")
+    parts = [p.strip() for p in question_and_options.split("|")]
+    if len(parts) < 3:
+        return await ctx.send(f"❌ Format: `{ctx.prefix}poll 1h Question | Option1 | Option2`")
+    question, options = parts[0], parts[1:][:9]
+    number_emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+    ends = datetime.now(timezone.utc) + td
+    desc = "\n".join(f"{number_emojis[i]} {opt}" for i, opt in enumerate(options))
+    e = discord.Embed(
+        title=f"📊 {question}",
+        description=desc + f"\n\n⏰ Ends: <t:{int(ends.timestamp())}:R>",
+        color=PREMIUM_COLOR
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    msg = await ctx.send(embed=e)
+    for i in range(len(options)):
+        await msg.add_reaction(number_emojis[i])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔊 TEMP VC
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="tempvc")
+@commands.has_permissions(manage_channels=True)
+async def p_tempvc(ctx, action: str, channel: discord.VoiceChannel = None):
+    """⭐ Premium: Auto-create temp VCs. Usage: $tempvc set #hub | $tempvc off"""
+    gid = ctx.guild.id
+    if action == "set":
+        if not channel: return await ctx.send("❌ Mention a voice channel.")
+        _p_tempvc_config[gid] = channel.id
+        DB.set_premium_config(gid, "tempvc", channel.id)
+        await ctx.send(embed=discord.Embed(description=f"✅ Temp VC hub set to **{channel.name}**! Users who join it will get their own VC.", color=C_SUCCESS))
+    elif action == "off":
+        _p_tempvc_config.pop(gid, None)
+        DB.set_premium_config(gid, "tempvc", 0)
+        await ctx.send(embed=discord.Embed(description="❌ Temp VC disabled.", color=C_ERROR))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  📌 STICKY MESSAGES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="sticky")
+@commands.has_permissions(manage_messages=True)
+async def p_sticky(ctx, action: str, *, content: str = ""):
+    """⭐ Premium: Sticky messages. Usage: $sticky set <text> | $sticky remove"""
+    ch_id = ctx.channel.id
+    if action == "set":
+        if not content: return await ctx.send("❌ Provide sticky content.")
+        msg = await ctx.send(f"{content}")
+        _p_sticky_msg[ch_id] = {"msg_id": msg.id, "content": content}
+        import json as _sj
+        DB.set_premium_config(ctx.guild.id, f"sticky_{ch_id}", _sj.dumps({"content": content}))
+        try: await ctx.message.delete()
+        except: pass
+    elif action == "remove":
+        if ch_id in _p_sticky_msg:
+            try:
+                old = await ctx.channel.fetch_message(_p_sticky_msg[ch_id]["msg_id"])
+                await old.delete()
+            except: pass
+            _p_sticky_msg.pop(ch_id)
+        import json as _sj
+        DB.set_premium_config(ctx.guild.id, f"sticky_{ch_id}", "")
+        await ctx.send(embed=discord.Embed(description="✅ Sticky removed.", color=C_SUCCESS), delete_after=5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔔 REMINDERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="remind", aliases=["reminder"])
+async def p_remind(ctx, duration: str, *, what: str):
+    """⭐ Premium: Set a reminder. Usage: $remind 30m Do homework"""
+    td = _pparse_duration(duration)
+    if not td: return await ctx.send("❌ Invalid duration. Use `30m`, `2h`, `1d`.")
+    when = datetime.now(timezone.utc) + td
+    uid = ctx.author.id
+    if uid not in _p_reminder_store:
+        _p_reminder_store[uid] = []
+    _p_reminder_store[uid].append({"when": when, "what": what, "ch_id": ctx.channel.id})
+    e = discord.Embed(
+        description=f"🔔 Reminder set! I'll ping you <t:{int(when.timestamp())}:R>.",
+        color=C_SUCCESS
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  💬 AUTO RESPONDER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="ar")
+@commands.has_permissions(manage_guild=True)
+async def p_ar(ctx, action: str, trigger: str = None, *, response: str = None):
+    """⭐ Premium: Auto responder. Usage: $ar add <trigger> <response>"""
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_autoresponder:
+        _p_autoresponder[gid] = {}
+    if action == "add":
+        if not trigger or not response:
+            return await ctx.send(f"❌ Usage: `{ctx.prefix}ar add <trigger> <response>`")
+        _p_autoresponder[gid][trigger] = response
+        DB.set_premium_config(gid, "autoresponder", _j.dumps(_p_autoresponder[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Auto responder added for `{trigger}`.", color=C_SUCCESS))
+    elif action == "remove":
+        if not trigger: return await ctx.send("❌ Provide trigger.")
+        _p_autoresponder[gid].pop(trigger, None)
+        DB.set_premium_config(gid, "autoresponder", _j.dumps(_p_autoresponder[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Trigger `{trigger}` removed.", color=C_SUCCESS))
+    elif action == "list":
+        items = _p_autoresponder.get(gid, {})
+        desc = "\n".join(f"`{t}` → {r[:60]}" for t, r in list(items.items())[:15]) if items else "No auto responders set."
+        await ctx.send(embed=discord.Embed(title="💬 Auto Responders", description=desc, color=PREMIUM_COLOR))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🌟 PREMIUM WELCOME
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="setwelcome")
+@commands.has_permissions(manage_guild=True)
+async def p_setwelcome(ctx, action: str, *, value: str = ""):
+    """Configure welcome messages. Usage: $setwelcome channel/message/dm/color/test"""
+    # Welcome commands are free for everyone
+    import json as _j
+    gid = ctx.guild.id
+    if gid not in _p_welcome_store:
+        _p_welcome_store[gid] = {}
+    if action == "channel" and ctx.message.channel_mentions:
+        _p_welcome_store[gid]["channel"] = ctx.message.channel_mentions[0].id
+        DB.set_premium_config(gid, "welcome", _j.dumps(_p_welcome_store[gid]))
+        await ctx.send(embed=discord.Embed(description=f"✅ Welcome channel → {ctx.message.channel_mentions[0].mention}", color=C_SUCCESS))
+    elif action == "message":
+        if not value: return await ctx.send("❌ Provide message. Placeholders: `{user}` `{server}` `{count}` `{name}`")
+        _p_welcome_store[gid]["message"] = value
+        DB.set_premium_config(gid, "welcome", _j.dumps(_p_welcome_store[gid]))
+        await ctx.send(embed=discord.Embed(description="✅ Welcome message updated.", color=C_SUCCESS))
+    elif action == "dm":
+        _p_welcome_store[gid]["dm"] = value
+        DB.set_premium_config(gid, "welcome", _j.dumps(_p_welcome_store[gid]))
+        await ctx.send(embed=discord.Embed(description="✅ Welcome DM set.", color=C_SUCCESS))
+    elif action == "color":
+        _p_welcome_store[gid]["color"] = value.strip("#")
+        DB.set_premium_config(gid, "welcome", _j.dumps(_p_welcome_store[gid]))
+        await ctx.send(embed=discord.Embed(description="✅ Welcome embed color updated.", color=C_SUCCESS))
+    elif action == "test":
+        cfg = _p_welcome_store.get(gid, {})
+        msg_t = cfg.get("message", "Welcome to **{server}**!")
+        msg_t = msg_t.replace("{user}", ctx.author.mention).replace("{server}", ctx.guild.name)\
+                     .replace("{count}", str(ctx.guild.member_count)).replace("{name}", ctx.author.display_name)
+        try: color = int(cfg.get("color", "fee75c"), 16)
+        except: color = PREMIUM_COLOR
+        e = discord.Embed(description=msg_t, color=color)
+        e.set_thumbnail(url=ctx.author.display_avatar.url)
+        e.set_footer(text=f"Test Welcome • {PREMIUM_FOOTER}")
+        await ctx.send(content=f"Welcome {ctx.author.mention}", embed=e)
+    elif action == "disable":
+        _p_welcome_store.pop(gid, None)
+        DB.set_premium_config(gid, "welcome", "{}")
+        await ctx.send(embed=discord.Embed(description="✅ Premium welcome disabled.", color=C_SUCCESS))
+    else:
+        cfg = _p_welcome_store.get(gid, {})
+        e = discord.Embed(title="🌟 Premium Welcome Config", color=PREMIUM_COLOR)
+        e.add_field(name="Channel", value=f"<#{cfg['channel']}>" if cfg.get("channel") else "Not set", inline=True)
+        e.add_field(name="DM", value="Set ✅" if cfg.get("dm") else "Not set", inline=True)
+        e.add_field(name="Color", value=f"#{cfg.get('color','fee75c')}", inline=True)
+        e.add_field(name="Message", value=cfg.get("message", "Default") or "Default", inline=False)
+        e.set_footer(text=PREMIUM_FOOTER)
+        await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔍 SNIPE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="snipe")
+async def p_snipe(ctx):
+    """⭐ Premium: See last deleted message. Usage: $snipe"""
+    data = _p_snipe_store.get(ctx.channel.id)
+    if not data:
+        return await ctx.send(embed=discord.Embed(description="❌ Nothing to snipe in this channel.", color=C_ERROR))
+    e = discord.Embed(description=data["content"], color=PREMIUM_COLOR, timestamp=data["time"])
+    e.set_author(name=data["author"], icon_url=data["avatar"])
+    e.set_footer(text=f"Deleted message • {PREMIUM_FOOTER}")
+    await ctx.send(embed=e)
+
+@bot.command(name="editsnipe", aliases=["esnipe"])
+async def p_editsnipe(ctx):
+    """⭐ Premium: See last edited message. Usage: $editsnipe"""
+    data = _p_editsnipe_store.get(ctx.channel.id)
+    if not data:
+        return await ctx.send(embed=discord.Embed(description="❌ Nothing to editsnipe.", color=C_ERROR))
+    e = discord.Embed(color=PREMIUM_COLOR, timestamp=data["time"])
+    e.set_author(name=data["author"], icon_url=data["avatar"])
+    e.add_field(name="Before", value=data["before"], inline=False)
+    e.add_field(name="After", value=data["after"], inline=False)
+    e.set_footer(text=f"Edited message • {PREMIUM_FOOTER}")
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ⭐ PREMIUM HELP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="premiumhelp", aliases=["phelp"])
+async def p_premiumhelp(ctx):
+    """Show all premium commands & features."""
+    p = ctx.prefix
+    is_vip = _is_vip(ctx.guild.id)
+    plan = _get_plan(ctx.guild.id)
+    plan_badge = "👑 VIP" if is_vip else "⭐ Premium"
+    e = discord.Embed(
+        title=f"👑 Empire Prime — All Commands",
+        description=f"Your server has **Empire Prime {plan_badge}** activated! Here are all exclusive features:",
+        color=0xffd700 if is_vip else PREMIUM_COLOR
+    )
+    e.add_field(name="☢️ Nuke Recovery", value=f"`{p}nukerecovery on/off`\n`{p}backup create/info`", inline=True)
+    e.add_field(name="📥 Server Import", value=f"`{p}importbackup <id>`\n`{p}listbackups` *(Owner only)*", inline=True)
+    e.add_field(name="🎁 Giveaways", value=f"`{p}gstart <dur> <wins> <prize>`\n`{p}gend <id>` • `{p}greroll <id>`", inline=True)
+    e.add_field(name="🏆 Level System", value=f"`{p}rank` • `{p}leaderboard`\n`{p}setlevel on/off/channel/addrole`", inline=True)
+    e.add_field(name="🎭 Reaction Roles", value=f"`{p}rr add <msg> <emoji> @role`\n`{p}rr remove` • `{p}rr list`", inline=True)
+    e.add_field(name="🤖 Auto Role", value=f"`{p}autorole add/remove/list @role`", inline=True)
+    e.add_field(name="📊 Polls", value=f"`{p}poll <dur> Q | Opt1 | Opt2`", inline=True)
+    e.add_field(name="🔊 Temp VC", value=f"`{p}tempvc set #hub` • `{p}tempvc off`", inline=True)
+    e.add_field(name="📌 Sticky", value=f"`{p}sticky set <text>` • `{p}sticky remove`", inline=True)
+    e.add_field(name="🔔 Reminder", value=f"`{p}remind <dur> <what>`", inline=True)
+    e.add_field(name="💬 Auto Responder", value=f"`{p}ar add/remove/list <trigger>`", inline=True)
+    e.add_field(name="🌟 Welcome", value=f"`{p}setwelcome channel/message/dm/color/test`", inline=True)
+    e.add_field(name="🔍 Snipe", value=f"`{p}snipe` • `{p}editsnipe`", inline=True)
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PREMIUM EVENTS HOOKED INTO bot.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# NOTE: These extend the existing on_member_join, on_message, etc. events
+# by checking premium status and running premium logic.
+
+async def _premium_on_member_join(member: discord.Member):
+    """Called from on_member_join — handles premium autorole + welcome."""
+    gid = member.guild.id
+    if not _is_premium(gid):
+        return
+    import json as _j
+
+    # Auto role
+    for role_id in _p_autorole_store.get(gid, []):
+        role = member.guild.get_role(role_id)
+        if role:
+            try: await member.add_roles(role, reason="Empire Prime AutoRole")
+            except: pass
+
+    # Premium welcome
+    cfg = _p_welcome_store.get(gid, {})
+    if cfg.get("channel"):
+        ch = member.guild.get_channel(cfg["channel"])
+        if ch:
+            msg = cfg.get("message", "Welcome {user} to **{server}**!")
+            msg = msg.replace("{user}", member.mention).replace("{server}", member.guild.name)\
+                     .replace("{count}", str(member.guild.member_count)).replace("{name}", member.display_name)
+            try: color = int(cfg.get("color", "fee75c"), 16)
+            except: color = PREMIUM_COLOR
+            e = discord.Embed(description=msg, color=color)
+            e.set_thumbnail(url=member.display_avatar.url)
+            e.set_footer(text=PREMIUM_FOOTER)
+            try: await ch.send(embed=e)
+            except: pass
+    if cfg.get("dm"):
+        dm_msg = cfg["dm"].replace("{user}", member.display_name).replace("{server}", member.guild.name)
+        try: await member.send(dm_msg)
+        except: pass
+
+async def _premium_on_message(message: discord.Message):
+    """Called from on_message — handles XP, autoresponder, sticky."""
+    if not message.guild:
+        return
+    gid = message.guild.id
+    if not _is_premium(gid):
+        return
+
+    # Skip bots entirely
+    if message.author.bot:
+        return
+    uid = message.author.id
+
+    # XP System
+    if _p_level_config.get(gid, {}).get("enabled"):
+        now = datetime.now(timezone.utc)
+        last = _p_xp_cooldown.get((gid, uid))
+        if not last or (now - last).total_seconds() > 60:
+            _p_xp_cooldown[(gid, uid)] = now
+            key = (gid, uid)
+            data = _p_level_store.get(key, {"xp": 0, "level": 0})
+            data["xp"] += _random.randint(15, 25)
+            xp_needed = 100 * (data["level"] + 1)
+            if data["xp"] >= xp_needed:
+                data["xp"] -= xp_needed
+                data["level"] += 1
+                _p_level_store[key] = data
+                DB.set_user_level(gid, uid, data["xp"], data["level"])
+                cfg = _p_level_config[gid]
+                ch_id = cfg.get("channel")
+                ch = message.guild.get_channel(ch_id) if ch_id else message.channel
+                if ch:
+                    e = discord.Embed(
+                        title="🏆 Level Up!",
+                        description=f"🎉 {message.author.mention} reached **Level {data['level']}**!",
+                        color=PREMIUM_COLOR
+                    )
+                    e.set_footer(text=PREMIUM_FOOTER)
+                    try: await ch.send(embed=e)
+                    except: pass
+                lvl_roles = cfg.get("roles", {})
+                role_id = lvl_roles.get(str(data["level"]))
+                if role_id:
+                    role = message.guild.get_role(int(role_id))
+                    if role:
+                        try: await message.author.add_roles(role, reason=f"Level {data['level']} reward")
+                        except: pass
+            else:
+                _p_level_store[key] = data
+                DB.set_user_level(gid, uid, data["xp"], data["level"])
+
+    # Auto Responder
+    content_lower = message.content.lower()
+    for trigger, response in _p_autoresponder.get(gid, {}).items():
+        if trigger.lower() in content_lower:
+            try: await message.channel.send(response)
+            except: pass
+            break
+
+async def _premium_on_message_delete(message: discord.Message):
+    if message.author.bot: return
+    _p_snipe_store[message.channel.id] = {
+        "content": message.content or "(no text)",
+        "author": str(message.author),
+        "avatar": str(message.author.display_avatar.url),
+        "time": datetime.now(timezone.utc)
+    }
+
+async def _premium_on_message_edit(before: discord.Message, after: discord.Message):
+    if before.author.bot or before.content == after.content: return
+    _p_editsnipe_store[before.channel.id] = {
+        "before": before.content or "(no text)",
+        "after": after.content or "(no text)",
+        "author": str(before.author),
+        "avatar": str(before.author.display_avatar.url),
+        "time": datetime.now(timezone.utc)
+    }
+
+def _match_emoji(rr: dict, payload_emoji) -> int | None:
+    """Match payload emoji against stored keys (handles unicode + custom emojis)."""
+    emoji_str = str(payload_emoji)
+    # Try direct match first
+    if emoji_str in rr:
+        return rr[emoji_str]
+    # Custom emoji: payload gives 'name:id', stored as '<:name:id>' or '<a:name:id>'
+    for key, role_id in rr.items():
+        key_clean = key.strip("<>").lstrip("a:")
+        if key_clean == emoji_str or key.strip("<>") == emoji_str:
+            return role_id
+        # Also match just the name part (fallback)
+        if ":" in emoji_str and emoji_str.split(":")[0] == key.strip("<>a:").split(":")[0]:
+            return role_id
+    return None
+
+async def _premium_on_reaction_add(payload: discord.RawReactionActionEvent):
+    if not payload.guild_id: return
+    gid = payload.guild_id
+    if not _is_premium(gid): return
+    rr = _p_reaction_roles.get(gid, {}).get(str(payload.message_id), {})
+    role_id = _match_emoji(rr, payload.emoji)
+    if role_id:
+        guild = bot.get_guild(gid)
+        member = guild.get_member(payload.user_id) if guild else None
+        if member and not member.bot:
+            role = guild.get_role(int(role_id))
+            if role:
+                try: await member.add_roles(role, reason="Empire Prime Reaction Role")
+                except: pass
+
+async def _premium_on_reaction_remove(payload: discord.RawReactionActionEvent):
+    if not payload.guild_id: return
+    gid = payload.guild_id
+    if not _is_premium(gid): return
+    rr = _p_reaction_roles.get(gid, {}).get(str(payload.message_id), {})
+    role_id = _match_emoji(rr, payload.emoji)
+    if role_id:
+        guild = bot.get_guild(gid)
+        member = guild.get_member(payload.user_id) if guild else None
+        if member and not member.bot:
+            role = guild.get_role(int(role_id))
+            if role:
+                try: await member.remove_roles(role, reason="Empire Prime Reaction Role removed")
+                except: pass
+
+async def _premium_on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    gid = member.guild.id
+    if not _is_premium(gid): return
+    hub_id = _p_tempvc_config.get(gid)
+    if after.channel and hub_id and after.channel.id == hub_id:
+        try:
+            new_vc = await member.guild.create_voice_channel(
+                name=f"⚡ {member.display_name}'s VC",
+                category=after.channel.category,
+                user_limit=10,
+                reason="Empire Prime TempVC"
+            )
+            await member.move_to(new_vc)
+            _p_tempvc_store[new_vc.id] = member.id
+        except: pass
+    if before.channel and before.channel.id in _p_tempvc_store:
+        if len(before.channel.members) == 0:
+            try:
+                await before.channel.delete(reason="Empire Prime TempVC cleanup")
+                _p_tempvc_store.pop(before.channel.id, None)
+            except: pass
+
+async def _premium_on_channel_delete(channel):
+    gid = channel.guild.id
+    if not _is_premium(gid) or not _p_nuke_recovery.get(gid, {}).get("enabled"): return
+    if len(channel.guild.channels) <= 2:
+        await _p_trigger_nuke_recovery(channel.guild, "mass_channel_delete")
+
+async def _premium_on_role_delete(role):
+    gid = role.guild.id
+    if not _is_premium(gid) or not _p_nuke_recovery.get(gid, {}).get("enabled"): return
+    if len(role.guild.roles) <= 1:
+        await _p_trigger_nuke_recovery(role.guild, "mass_role_delete")
+
+async def _premium_check_reminders():
+    """Background reminder check — called from on_message loop."""
+    now = datetime.now(timezone.utc)
+    for uid, reminders in list(_p_reminder_store.items()):
+        due = [r for r in reminders if r["when"] <= now]
+        if not due: continue
+        _p_reminder_store[uid] = [r for r in reminders if r["when"] > now]
+        for r in due:
+            ch = bot.get_channel(r["ch_id"])
+            if ch:
+                user = bot.get_user(uid)
+                mention = user.mention if user else f"<@{uid}>"
+                e = discord.Embed(
+                    title="🔔 Reminder!",
+                    description=f"{mention} — **{r['what']}**",
+                    color=PREMIUM_COLOR
+                )
+                e.set_footer(text=PREMIUM_FOOTER)
+                try: await ch.send(embed=e)
+                except: pass
+
+async def _premium_check_giveaways():
+    """Background giveaway check — called periodically."""
+    now = datetime.now(timezone.utc)
+    for gid, giveaways in list(_p_giveaway_store.items()):
+        for msg_id, gw in list(giveaways.items()):
+            if gw.get("ended"): continue
+            try:
+                ends = datetime.fromisoformat(gw["ends"]).replace(tzinfo=timezone.utc)
+            except:
+                continue
+            if now >= ends:
+                await _p_end_giveaway(gid, msg_id, gw)
+
+
+# ─── Patch existing on_ready to load premium data ─────────────────────────────
+_orig_on_ready = bot.get_cog  # placeholder — we inject below
+
+@bot.listen("on_ready")
+async def _premium_ready():
+    global _PREMIUM_CACHE
+    _load_premium_memory()
+    _refresh_premium_cache()
+    # Restore active giveaways from DB (survive restart)
+    try:
+        from datetime import datetime, timezone as _tz
+        restored = 0
+        for gw in DB.get_active_giveaways():
+            msg_id = gw["msg_id"]
+            end_time = datetime.fromisoformat(gw["end_time"]).replace(tzinfo=_tz.utc)
+            if datetime.now(_tz.utc) >= end_time:
+                # Already expired — end it now
+                guild = bot.get_guild(gw["guild_id"])
+                if guild:
+                    asyncio.create_task(_end_giveaway(msg_id, guild))
+                DB.end_giveaway_db(msg_id)
+            else:
+                # Restore into memory
+                giveaway_store[msg_id] = {
+                    "channel_id": gw["channel_id"],
+                    "prize":      gw["prize"],
+                    "winners":    gw["winners"],
+                    "end_time":   end_time,
+                    "host_id":    gw["host_id"],
+                    "ended":      False,
+                    "msg_id":     msg_id
+                }
+                # Re-schedule auto-end
+                async def _reschedule(mid=msg_id, et=end_time, gid=gw["guild_id"]):
+                    delay = (et - datetime.now(_tz.utc)).total_seconds()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    g = bot.get_guild(gid)
+                    if g:
+                        await _end_giveaway(mid, g)
+                asyncio.create_task(_reschedule())
+                restored += 1
+        if restored:
+            print(f"[GIVEAWAY] Restored {restored} active giveaway(s) from DB")
+    except Exception as _ge:
+        print(f"[GIVEAWAY] Restore error: {_ge}")
+    # Load from file IMMEDIATELY on startup — don't wait 15s
+    file_ids = _read_premium_file()
+    if file_ids:
+        _PREMIUM_CACHE |= file_ids
+        print(f"[PREMIUM] Loaded from file: {file_ids}")
+    print(f"[PREMIUM] Data loaded into bot.py memory. Premium guilds: {len(_PREMIUM_CACHE)}")
+    if not _watch_premium_file.is_running():
+        _watch_premium_file.start()
+
+# ── Watch premium_guilds.txt every 15s — picks up dashboard activations instantly ──
+@tasks.loop(seconds=15)
+async def _watch_premium_file():
+    """Auto-reload premium cache from file — no bot restart needed after dashboard activation."""
+    global _PREMIUM_CACHE
+    file_ids = _read_premium_file()
+    if file_ids and not file_ids.issubset(_PREMIUM_CACHE):
+        new_ids = file_ids - _PREMIUM_CACHE
+        _PREMIUM_CACHE |= file_ids
+        print(f"[PREMIUM] Auto-detected new premium guilds from file: {new_ids}")
+
+# ─── Patch existing events with premium hooks ─────────────────────────────────
+@bot.listen("on_member_join")
+async def _premium_member_join(member: discord.Member):
+    await _premium_on_member_join(member)
+
+@bot.listen("on_message")
+async def _sticky_handler(message: discord.Message):
+    """Sticky + autoreact + wordreact handler."""
+    if not message.guild:
+        return
+
+    gid = message.guild.id
+
+    # Auto-react + Word react — only human messages
+    if not message.author.bot:
+        # Auto-react (channel-wide)
+        ch_id_str = str(message.channel.id)
+        if gid in _p_autoreact and ch_id_str in _p_autoreact[gid]:
+            for emoji in _p_autoreact[gid][ch_id_str]:
+                try: await message.add_reaction(emoji)
+                except: pass
+
+        # Word react (keyword-based)
+        if gid in _p_wordreact and message.content:
+            msg_lower = message.content.lower()
+            added_emojis = set()
+            for keyword, emojis in _p_wordreact[gid].items():
+                if keyword in msg_lower:
+                    for emoji in emojis:
+                        if emoji not in added_emojis:
+                            added_emojis.add(emoji)
+                            try: await message.add_reaction(emoji)
+                            except: pass
+
+    # Sticky — runs for ALL messages except the sticky itself
+    ch_id = message.channel.id
+    sticky = _p_sticky_msg.get(ch_id)
+    if sticky and message.id != sticky["msg_id"]:
+        old_msg_id = sticky["msg_id"]
+        content_to_send = sticky["content"]
+        _p_sticky_msg.pop(ch_id, None)
+        # Send new + delete old simultaneously
+        try:
+            new_msg, _ = await asyncio.gather(
+                message.channel.send(content_to_send),
+                message.channel.get_partial_message(old_msg_id).delete()
+            )
+            _p_sticky_msg[ch_id] = {"msg_id": new_msg.id, "content": content_to_send}
+        except:
+            try:
+                new_msg = await message.channel.send(content_to_send)
+                _p_sticky_msg[ch_id] = {"msg_id": new_msg.id, "content": content_to_send}
+            except: pass
+
+@bot.listen("on_message")
+async def _premium_message(message: discord.Message):
+    await _premium_on_message(message)
+    await _premium_check_reminders()
+
+@bot.listen("on_message_delete")
+async def _premium_msg_delete(message: discord.Message):
+    await _premium_on_message_delete(message)
+
+@bot.listen("on_message_edit")
+async def _premium_msg_edit(before: discord.Message, after: discord.Message):
+    await _premium_on_message_edit(before, after)
+
+@bot.listen("on_raw_reaction_add")
+async def _premium_react_add(payload: discord.RawReactionActionEvent):
+    await _premium_on_reaction_add(payload)
+
+@bot.listen("on_raw_reaction_remove")
+async def _premium_react_remove(payload: discord.RawReactionActionEvent):
+    await _premium_on_reaction_remove(payload)
+
+@bot.listen("on_voice_state_update")
+async def _premium_voice(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    await _premium_on_voice_state_update(member, before, after)
+
+@bot.listen("on_guild_channel_delete")
+async def _premium_ch_delete(channel):
+    await _premium_on_channel_delete(channel)
+
+@bot.listen("on_guild_role_delete")
+async def _premium_role_delete(role):
+    await _premium_on_role_delete(role)
+
+# Background giveaway check (runs every 15 sec via on_message trigger — lightweight)
+_last_gw_check = datetime.now(timezone.utc)
+@bot.listen("on_message")
+async def _premium_gw_check(message: discord.Message):
+    global _last_gw_check
+    now = datetime.now(timezone.utc)
+    if (now - _last_gw_check).total_seconds() >= 15:
+        _last_gw_check = now
+        await _premium_check_giveaways()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RUN
+# ═══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    if not TOKEN:
+        print("<a:disabled1:1483344744024248453>  BOT_TOKEN not set in .env file!")
+        exit(1)
+    bot.run(TOKEN)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔰 VANITY PROTECTION — Empire Prime Premium Feature
+#  Protects server vanity URL. Reverts unauthorized changes & bans the actor.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_vanity_cache: dict[int, str | None] = {}       # guild_id → last known vanity code
+_vanity_protection_enabled: dict[int, bool] = {} # guild_id → enabled?
+
+# ── Load vanity cache on startup ──────────────────────────────────────────────
+@bot.listen("on_ready")
+async def _vanity_ready():
+    for guild in bot.guilds:
+        if "VANITY_URL" in guild.features:
+            try:
+                inv = await guild.vanity_invite()
+                _vanity_cache[guild.id] = inv.code if inv else None
+            except Exception:
+                _vanity_cache[guild.id] = None
+    # Load enabled state from DB premium configs
+    for gid, data in DB.load_all_premium_configs().items():
+        if data.get("vanity_protection"):
+            _vanity_protection_enabled[gid] = bool(int(data["vanity_protection"]))
+    print("[VANITY] Vanity Protection loaded.")
+
+
+# ── Detect vanity change ───────────────────────────────────────────────────────
+@bot.listen("on_guild_update")
+async def _vanity_guild_update(before: discord.Guild, after: discord.Guild):
+    """Intercept vanity URL changes and revert + ban the unauthorized actor."""
+    if not _vanity_protection_enabled.get(after.id):
+        return
+    if not _is_premium(after.id):
+        return
+    if "VANITY_URL" not in after.features:
+        return
+
+    try:
+        inv = await after.vanity_invite()
+        new_code = inv.code if inv else None
+    except Exception:
+        return
+
+    old_code = _vanity_cache.get(after.id)
+
+    if old_code is None:
+        # First time seeing — just cache it
+        _vanity_cache[after.id] = new_code
+        return
+
+    if new_code == old_code:
+        return  # No change
+
+    # Vanity was changed — find who did it
+    actor = None
+    try:
+        async for entry in after.audit_logs(limit=3, action=discord.AuditLogAction.guild_update):
+            if entry.user and entry.user.id != after.owner_id and not entry.user.bot:
+                actor = entry.user
+                break
+    except Exception:
+        pass
+
+    # Revert the vanity back to old code
+    try:
+        await after.edit(vanity_code=old_code, reason="[Empire Prime] Vanity Protection — unauthorized change reverted")
+    except Exception as e:
+        pass  # May fail if bot lacks permission or feature unavailable
+
+    alert_desc = (
+        f"🔰 **Vanity URL was changed!**\n\n"
+        f"**Old:** `discord.gg/{old_code}`\n"
+        f"**Changed to:** `discord.gg/{new_code}`\n"
+        f"**Status:** Reverted instantly ✅\n"
+    )
+
+    if actor:
+        alert_desc += f"**Unauthorized Actor:** {actor.mention} (`{actor.id}`)\n"
+        # Ban the actor
+        try:
+            await after.ban(
+                actor,
+                reason="[Empire Prime] Vanity Protection — unauthorized vanity change",
+                delete_message_days=0
+            )
+            alert_desc += f"**Action:** Banned 🔨"
+        except Exception:
+            alert_desc += f"**Action:** Could not ban (missing permission)"
+
+    e = discord.Embed(
+        title="🔰 Vanity Protection Triggered",
+        description=alert_desc,
+        color=PREMIUM_COLOR,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await send_bot_log(after, "Vanity Protection", alert_desc, PREMIUM_COLOR)
+
+    # Keep cache as the restored old code
+    _vanity_cache[after.id] = old_code
+
+
+# ── Commands ───────────────────────────────────────────────────────────────────
+@bot.command(name="vanityprotect")
+@commands.has_permissions(administrator=True)
+async def vanity_protect_cmd(ctx, action: str = "status"):
+    """🔰 Premium: Protect your server vanity URL. Usage: $vanityprotect on/off/status"""
+    if "VANITY_URL" not in ctx.guild.features:
+        e = discord.Embed(
+            title="❌ No Vanity URL",
+            description="Your server does not have a custom vanity URL. You need **Level 3 Boost** to unlock vanity URLs.",
+            color=0xe74c3c
+        )
+        return await ctx.send(embed=e)
+
+    gid = ctx.guild.id
+    action = action.lower()
+
+    if action == "on":
+        _vanity_protection_enabled[gid] = True
+        DB.set_premium_config(gid, "vanity_protection", "1")
+        # Cache current vanity
+        try:
+            inv = await ctx.guild.vanity_invite()
+            _vanity_cache[gid] = inv.code if inv else None
+        except Exception:
+            _vanity_cache[gid] = None
+        e = discord.Embed(
+            title="🔰 Vanity Protection Enabled",
+            description=(
+                f"✅ Your vanity URL **`discord.gg/{_vanity_cache.get(gid, '?')}`** is now protected.\n\n"
+                "• Any unauthorized change will be **instantly reverted**.\n"
+                "• The actor (except server owner) will be **banned immediately**.\n"
+                "• Only the **server owner** can change the vanity safely."
+            ),
+            color=PREMIUM_COLOR
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+
+    elif action == "off":
+        _vanity_protection_enabled[gid] = False
+        DB.set_premium_config(gid, "vanity_protection", "0")
+        e = discord.Embed(
+            title="🔰 Vanity Protection Disabled",
+            description="Vanity URL protection has been turned **off**.",
+            color=0xe74c3c
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+
+    elif action == "status":
+        enabled = _vanity_protection_enabled.get(gid, False)
+        try:
+            inv = await ctx.guild.vanity_invite()
+            current_vanity = inv.code if inv else "Unknown"
+        except Exception:
+            current_vanity = "Unknown"
+        status_str = "✅ **Enabled**" if enabled else "❌ **Disabled**"
+        e = discord.Embed(
+            title="🔰 Vanity Protection Status",
+            description=(
+                f"**Status:** {status_str}\n"
+                f"**Current Vanity:** `discord.gg/{current_vanity}`\n\n"
+                f"Use `$vanityprotect on` to enable protection."
+            ),
+            color=PREMIUM_COLOR
+        )
+        e.set_footer(text=PREMIUM_FOOTER)
+
+    else:
+        e = discord.Embed(
+            title="❌ Invalid Action",
+            description="Usage: `$vanityprotect on` / `$vanityprotect off` / `$vanityprotect status`",
+            color=0xe74c3c
+        )
+
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  END OF APPEND
+# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ⭐ PREMIUM_BOT.PY MERGED — All features now run in single bot.py process
+#  One bot token. Premium features gated via _is_premium() check.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import random as _rnd
+
+# ── In-memory stores (prefixed _pb_ to avoid collision with bot.py stores) ────
+_pb_backup_store        = {}   # guild_id → backup dict
+_pb_nuke_recovery       = {}   # guild_id → {enabled, _recovering}
+_pb_giveaway_store      = {}   # guild_id → {str(msg_id): gw_data}
+_pb_reaction_roles      = {}   # guild_id → {str(msg_id): {emoji: role_id}}
+_pb_autorole_store      = {}   # guild_id → [role_ids]
+_pb_welcome_store       = {}   # guild_id → config dict
+_pb_autoresponder       = {}   # guild_id → {trigger: response}
+_pb_sticky_msg          = {}   # channel_id → {msg_id, content}
+_pb_level_store         = {}   # (guild_id, user_id) → {xp, level}
+_pb_level_config        = {}   # guild_id → {enabled, channel, roles}
+_pb_tempvc_store        = {}   # vc_channel_id → owner_id
+_pb_tempvc_config       = {}   # guild_id → hub_channel_id
+_pb_snipe_store         = {}   # channel_id → {content, author, avatar, time}
+_pb_editsnipe_store     = {}   # channel_id → {before, after, author, avatar, time}
+_pb_poll_store          = {}   # msg_id → poll data
+_pb_reminder_store      = {}   # user_id → [{when, what, ch_id}]
+_pb_xp_cooldown         = {}   # (guild_id, user_id) → last_xp datetime
+_pb_last_gw_check       = datetime.now(timezone.utc)
+
+# ── Load from DB on startup ───────────────────────────────────────────────────
+@bot.listen("on_ready")
+async def _pb_ready():
+    import json as _j
+    for gid, data in DB.load_all_premium_configs().items():
+        if data.get("autorole"):
+            try: _pb_autorole_store[gid] = _j.loads(data["autorole"])
+            except: pass
+        if data.get("reaction_roles"):
+            try: _pb_reaction_roles[gid] = _j.loads(data["reaction_roles"])
+            except: pass
+        if data.get("welcome"):
+            try: _pb_welcome_store[gid] = _j.loads(data["welcome"])
+            except: pass
+        if data.get("autoresponder"):
+            try: _pb_autoresponder[gid] = _j.loads(data["autoresponder"])
+            except: pass
+        if data.get("level_config"):
+            try: _pb_level_config[gid] = _j.loads(data["level_config"])
+            except: pass
+        if data.get("tempvc"):
+            try: _pb_tempvc_config[gid] = int(data["tempvc"])
+            except: pass
+        if data.get("nuke_recovery"):
+            try: _pb_nuke_recovery[gid] = _j.loads(data["nuke_recovery"])
+            except: pass
+        if data.get("backup"):
+            try: _pb_backup_store[gid] = _j.loads(data["backup"])
+            except: pass
+    # Start background tasks
+    if not _pb_check_reminders.is_running():
+        _pb_check_reminders.start()
+    if not _pb_check_giveaways.is_running():
+        _pb_check_giveaways.start()
+    if not _pb_sticky_refresh.is_running():
+        _pb_sticky_refresh.start()
+    print("[PB-MERGED] premium_bot.py features loaded into bot.py ✅")
+
+
+# ── Background Tasks ──────────────────────────────────────────────────────────
+@tasks.loop(seconds=30)
+async def _pb_check_reminders():
+    now = datetime.now(timezone.utc)
+    for uid, reminders in list(_pb_reminder_store.items()):
+        due = [r for r in reminders if r["when"] <= now]
+        if not due: continue
+        _pb_reminder_store[uid] = [r for r in reminders if r["when"] > now]
+        for r in due:
+            ch = bot.get_channel(r["ch_id"])
+            if ch:
+                user = bot.get_user(uid)
+                mention = user.mention if user else f"<@{uid}>"
+                e = discord.Embed(
+                    title="🔔 Reminder!",
+                    description=f"{mention} — **{r['what']}**",
+                    color=PREMIUM_COLOR
+                )
+                e.set_footer(text=PREMIUM_FOOTER)
+                try: await ch.send(embed=e)
+                except: pass
+
+@tasks.loop(seconds=15)
+async def _pb_check_giveaways():
+    now = datetime.now(timezone.utc)
+    for gid, giveaways in list(_pb_giveaway_store.items()):
+        for msg_id, gw in list(giveaways.items()):
+            if gw.get("ended"): continue
+            try:
+                ends = datetime.fromisoformat(gw["ends"]).replace(tzinfo=timezone.utc)
+            except: continue
+            if now >= ends:
+                await _pb_end_giveaway(gid, msg_id, gw)
+
+async def _pb_end_giveaway(gid: int, msg_id, gw: dict):
+    _pb_giveaway_store[gid][str(msg_id)]["ended"] = True
+    guild = bot.get_guild(gid)
+    if not guild: return
+    ch = guild.get_channel(gw["channel_id"])
+    if not ch: return
+    try:
+        msg = await ch.fetch_message(int(msg_id))
+        reaction = discord.utils.get(msg.reactions, emoji="🎁")
+        users = [u async for u in reaction.users() if not u.bot] if reaction else []
+    except: users = []
+
+    if not users:
+        e = discord.Embed(title="🎁 Giveaway Ended — No Winners",
+                          description=f"**Prize:** {gw['prize']}\nNo valid entries.", color=0xed4245)
+    else:
+        winners = _rnd.sample(users, min(gw.get("winners", 1), len(users)))
+        mention_str = " ".join(w.mention for w in winners)
+        e = discord.Embed(title="🎁 Giveaway Ended!",
+                          description=f"**Prize:** {gw['prize']}\n**Winner(s):** {mention_str}",
+                          color=PREMIUM_COLOR)
+        await ch.send(f"🎉 Congratulations {mention_str}! You won **{gw['prize']}**!")
+    e.set_footer(text=PREMIUM_FOOTER)
+    try: await msg.edit(embed=e)
+    except: await ch.send(embed=e)
+
+@tasks.loop(seconds=60)
+async def _pb_sticky_refresh():
+    for ch_id, data in list(_pb_sticky_msg.items()):
+        ch = bot.get_channel(ch_id)
+        if not ch: continue
+        try:
+            msgs = [m async for m in ch.history(limit=1)]
+            if msgs and msgs[0].id != data["msg_id"]:
+                try:
+                    old = await ch.fetch_message(data["msg_id"])
+                    await old.delete()
+                except: pass
+                e = discord.Embed(description=f"📌 {data['content']}", color=PREMIUM_COLOR)
+                e.set_footer(text=PREMIUM_FOOTER)
+                new_msg = await ch.send(embed=e)
+                _pb_sticky_msg[ch_id]["msg_id"] = new_msg.id
+        except: pass
+
+
+# ── Events ────────────────────────────────────────────────────────────────────
+@bot.listen("on_member_join")
+async def _pb_member_join(member: discord.Member):
+    gid = member.guild.id
+    if not _is_premium(gid): return
+    # Auto role
+    for role_id in _pb_autorole_store.get(gid, []):
+        role = member.guild.get_role(role_id)
+        if role:
+            try: await member.add_roles(role, reason="Empire Prime AutoRole")
+            except: pass
+    # Welcome message
+    cfg = _pb_welcome_store.get(gid, {})
+    if cfg.get("channel"):
+        ch = member.guild.get_channel(cfg["channel"])
+        if ch:
+            tmpl = cfg.get("message", "Welcome {user} to **{server}**!")
+            text = (tmpl.replace("{user}", member.mention)
+                       .replace("{server}", member.guild.name)
+                       .replace("{count}", str(member.guild.member_count))
+                       .replace("{name}", member.display_name))
+            try:
+                color = int(cfg.get("color", "fee75c"), 16)
+            except: color = PREMIUM_COLOR
+            e = discord.Embed(description=text, color=color)
+            e.set_thumbnail(url=member.display_avatar.url)
+            e.set_footer(text=PREMIUM_FOOTER)
+            try: await ch.send(embed=e)
+            except: pass
+    # DM welcome
+    if cfg.get("dm"):
+        dm_text = (cfg["dm"].replace("{user}", member.display_name)
+                             .replace("{server}", member.guild.name))
+        try: await member.send(dm_text)
+        except: pass
+
+@bot.listen("on_message_delete")
+async def _pb_msg_delete(message: discord.Message):
+    if message.author.bot or not message.content: return
+    _pb_snipe_store[message.channel.id] = {
+        "content": message.content,
+        "author": str(message.author),
+        "avatar": str(message.author.display_avatar.url),
+        "time": datetime.now(timezone.utc)
+    }
+
+@bot.listen("on_message_edit")
+async def _pb_msg_edit(before: discord.Message, after: discord.Message):
+    if before.author.bot or before.content == after.content: return
+    _pb_editsnipe_store[before.channel.id] = {
+        "before": before.content,
+        "after": after.content,
+        "author": str(before.author),
+        "avatar": str(before.author.display_avatar.url),
+        "time": datetime.now(timezone.utc)
+    }
+
+@bot.listen("on_message")
+async def _pb_on_message(message: discord.Message):
+    if message.author.bot or not message.guild: return
+    gid = message.guild.id
+    uid = message.author.id
+    if not _is_premium(gid): return
+    # Level XP
+    if _pb_level_config.get(gid, {}).get("enabled"):
+        now = datetime.now(timezone.utc)
+        last = _pb_xp_cooldown.get((gid, uid))
+        if not last or (now - last).total_seconds() > 60:
+            _pb_xp_cooldown[(gid, uid)] = now
+            key = (gid, uid)
+            data = _pb_level_store.get(key, {"xp": 0, "level": 0})
+            data["xp"] += _rnd.randint(15, 25)
+            xp_needed = 100 * (data["level"] + 1)
+            if data["xp"] >= xp_needed:
+                data["xp"] -= xp_needed
+                data["level"] += 1
+                _pb_level_store[key] = data
+                DB.set_user_level(gid, uid, data["xp"], data["level"])
+                cfg = _pb_level_config[gid]
+                ch_id = cfg.get("channel")
+                ch = message.guild.get_channel(ch_id) if ch_id else message.channel
+                if ch:
+                    e = discord.Embed(
+                        title="🏆 Level Up!",
+                        description=f"🎉 {message.author.mention} reached **Level {data['level']}**!",
+                        color=PREMIUM_COLOR
+                    )
+                    e.set_footer(text=PREMIUM_FOOTER)
+                    try: await ch.send(embed=e)
+                    except: pass
+                role_id = cfg.get("roles", {}).get(str(data["level"]))
+                if role_id:
+                    role = message.guild.get_role(int(role_id))
+                    if role:
+                        try: await message.author.add_roles(role, reason=f"Level {data['level']} reward")
+                        except: pass
+            else:
+                _pb_level_store[key] = data
+                DB.set_user_level(gid, uid, data["xp"], data["level"])
+    # Auto responder
+    if gid in _pb_autoresponder:
+        lower = message.content.lower()
+        for trigger, response in _pb_autoresponder[gid].items():
+            if trigger.lower() in lower:
+                try: await message.channel.send(response)
+                except: pass
+                break
+
+@bot.listen("on_raw_reaction_add")
+async def _pb_reaction_add(payload: discord.RawReactionActionEvent):
+    if not payload.guild_id: return
+    gid = payload.guild_id
+    if not _is_premium(gid): return
+    rr = _pb_reaction_roles.get(gid, {}).get(str(payload.message_id), {})
+    role_id = rr.get(str(payload.emoji))
+    if not role_id: return
+    guild = bot.get_guild(gid)
+    if not guild: return
+    member = guild.get_member(payload.user_id)
+    if member:
+        role = guild.get_role(role_id)
+        if role:
+            try: await member.add_roles(role, reason="Empire Prime Reaction Role")
+            except: pass
+
+@bot.listen("on_raw_reaction_remove")
+async def _pb_reaction_remove(payload: discord.RawReactionActionEvent):
+    if not payload.guild_id: return
+    gid = payload.guild_id
+    if not _is_premium(gid): return
+    rr = _pb_reaction_roles.get(gid, {}).get(str(payload.message_id), {})
+    role_id = rr.get(str(payload.emoji))
+    if not role_id: return
+    guild = bot.get_guild(gid)
+    if not guild: return
+    member = guild.get_member(payload.user_id)
+    if member:
+        role = guild.get_role(role_id)
+        if role:
+            try: await member.remove_roles(role, reason="Empire Prime Reaction Role removed")
+            except: pass
+
+@bot.listen("on_voice_state_update")
+async def _pb_voice(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    gid = member.guild.id
+    if not _is_premium(gid): return
+    hub_id = _pb_tempvc_config.get(gid)
+    if not hub_id: return
+    # User joins hub → create temp VC
+    if after.channel and after.channel.id == hub_id:
+        try:
+            new_vc = await member.guild.create_voice_channel(
+                name=f"🔊 {member.display_name}'s VC",
+                category=after.channel.category,
+                reason="Empire Prime TempVC"
+            )
+            await member.move_to(new_vc)
+            _pb_tempvc_store[new_vc.id] = member.id
+        except: pass
+    # User leaves temp VC → delete if empty
+    if before.channel and before.channel.id in _pb_tempvc_store:
+        if len(before.channel.members) == 0:
+            try:
+                await before.channel.delete(reason="Empire Prime TempVC cleanup")
+                _pb_tempvc_store.pop(before.channel.id, None)
+            except: pass
+
+@bot.listen("on_guild_channel_delete")
+async def _pb_ch_delete(channel):
+    gid = channel.guild.id
+    if not _is_premium(gid): return
+    cfg = _pb_nuke_recovery.get(gid, {})
+    if not cfg.get("enabled"): return
+    if len(channel.guild.channels) <= 2:
+        await _pb_trigger_nuke_recovery(channel.guild, "mass_channel_delete")
+
+@bot.listen("on_guild_role_delete")
+async def _pb_role_delete(role):
+    gid = role.guild.id
+    if not _is_premium(gid): return
+    cfg = _pb_nuke_recovery.get(gid, {})
+    if not cfg.get("enabled"): return
+    if len(role.guild.roles) <= 1:
+        await _pb_trigger_nuke_recovery(role.guild, "mass_role_delete")
+
+
+# ── Nuke Recovery ─────────────────────────────────────────────────────────────
+async def _pb_trigger_nuke_recovery(guild: discord.Guild, reason: str):
+    nk = _pb_nuke_recovery.get(guild.id, {})
+    if nk.get("_recovering"): return
+    _pb_nuke_recovery[guild.id]["_recovering"] = True
+    unbanned = 0
+    invite = None
+    for ch in guild.text_channels:
+        try:
+            invite = await ch.create_invite(max_age=86400, max_uses=0, reason="Empire Prime Nuke Recovery")
+            break
+        except: pass
+    try:
+        bans = [entry async for entry in guild.bans(limit=None)]
+        for ban_entry in bans:
+            try:
+                await guild.unban(ban_entry.user, reason="Empire Prime Nuke Recovery")
+                unbanned += 1
+                if invite:
+                    try:
+                        await ban_entry.user.send(
+                            f"⚡ **{guild.name}** suffered a nuke attack but has been recovered!\n"
+                            f"You've been unbanned. Rejoin here: {invite.url}"
+                        )
+                    except: pass
+                await asyncio.sleep(0.5)
+            except: pass
+    except: pass
+
+    restored_roles = 0
+    restored_channels = 0
+    backup = _pb_backup_store.get(guild.id)
+    if backup:
+        for r_data in backup.get("roles", []):
+            if r_data["name"] == "@everyone": continue
+            try:
+                await guild.create_role(
+                    name=r_data["name"],
+                    color=discord.Color(r_data["color"]),
+                    permissions=discord.Permissions(r_data["perms"]),
+                    hoist=r_data["hoist"],
+                    mentionable=r_data["mentionable"],
+                    reason="Empire Prime Nuke Recovery"
+                )
+                restored_roles += 1
+            except: pass
+        for ch_data in backup.get("channels", []):
+            try:
+                if ch_data["type"] == "text":
+                    await guild.create_text_channel(name=ch_data["name"], topic=ch_data.get("topic",""), reason="Empire Prime Nuke Recovery")
+                else:
+                    await guild.create_voice_channel(name=ch_data["name"], reason="Empire Prime Nuke Recovery")
+                restored_channels += 1
+            except: pass
+
+    for ch in guild.text_channels:
+        try:
+            e = discord.Embed(
+                title="☢️ NUKE RECOVERY COMPLETE",
+                description=(
+                    f"**Trigger:** `{reason}`\n**Server:** {guild.name}\n\n"
+                    f"✅ **{unbanned}** members unbanned & reinvited\n"
+                    f"✅ **{restored_roles}** roles restored\n"
+                    f"✅ **{restored_channels}** channels restored\n\n"
+                    f"Empire Prime protected your server! 🛡️"
+                ),
+                color=PREMIUM_COLOR,
+                timestamp=datetime.now(timezone.utc)
+            )
+            e.set_footer(text=PREMIUM_FOOTER)
+            await ch.send(embed=e)
+            break
+        except: pass
+    _pb_nuke_recovery[guild.id]["_recovering"] = False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔄 PREMIUM REFRESH — Reload premium from DB without restarting bot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="premiumrefresh", aliases=["prerefresh"])
+@commands.has_permissions(administrator=True)
+async def premium_refresh_cmd(ctx):
+    """Owner/Admin: Reload premium status from DB. $premiumrefresh"""
+    global _PREMIUM_CACHE
+    gid = ctx.guild.id
+    # Reload from BOTH DB and file
+    _refresh_premium_cache()
+    file_ids = _read_premium_file()
+    if file_ids:
+        _PREMIUM_CACHE |= file_ids
+    is_now = _is_premium(gid)
+    if is_now:
+        _load_premium_memory()
+        e = discord.Embed(
+            title="✅ Premium Refreshed",
+            description=(
+                f"**Server:** {ctx.guild.name}\n"
+                f"**Premium Status:** ✅ Active\n\n"
+                f"All premium features are now unlocked!\n"
+                f"Use `$premiumhelp` to see all commands."
+            ),
+            color=PREMIUM_COLOR
+        )
+    else:
+        e = discord.Embed(
+            title="❌ Not Premium",
+            description=(
+                f"**Server:** {ctx.guild.name}\n"
+                f"**Premium Status:** ❌ Not Active\n\n"
+                f"Ask the bot owner to activate premium from the dashboard."
+            ),
+            color=0xed4245
+        )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔄 AUTO-SYNC ENGINE — Dashboard → Bot (koi command nahi chahiye!)
+#  Kaam kaise karta hai:
+#    Dashboard koi bhi setting save kare → DB sync_log mein entry daale
+#    Bot har 10 seconds mein sync_log check kare → changed guild ki settings
+#    turant memory mein reload ho jayein — automatically, bina restart ke
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _reload_guild_settings(gid: int, change_type: str = "all"):
+    """Ek guild ki sab (ya specific) settings DB se memory mein reload karo."""
+    try:
+        # ── Prefix + Log Channels ────────────────────────────────────────────
+        if change_type in ("all", "settings", "prefix", "logs"):
+            all_settings = DB.load_all_logs()
+            if gid in all_settings:
+                cfg = all_settings[gid]
+                if cfg.get("prefix"):
+                    GUILD_PREFIXES[gid] = cfg["prefix"]
+                else:
+                    GUILD_PREFIXES.pop(gid, None)
+                _guild_logs[gid] = {
+                    "bot_log":    cfg.get("bot_log")    or 0,
+                    "mod_log":    cfg.get("mod_log")    or 0,
+                    "invite_log": cfg.get("invite_log") or 0,
+                    "ticket_log": cfg.get("ticket_log") or 0,
+                }
+    except Exception as e:
+        print(f"[SYNC] Prefix/Logs reload error gid={gid}: {e}")
+
+    try:
+        # ── Anti-Nuke ────────────────────────────────────────────────────────
+        if change_type in ("all", "antinuke"):
+            all_antinuke = DB.load_all_antinuke()
+            if gid in all_antinuke:
+                cfg = all_antinuke[gid]
+                ANTINUKE_ENABLED[gid]    = bool(cfg["enabled"])
+                ANTINUKE_PUNISHMENT[gid] = cfg["punishment"]
+                if cfg["log_channel"]:
+                    ANTINUKE_LOG_CHANNEL[gid] = cfg["log_channel"]
+                _raid_shield[gid] = bool(cfg["raid_shield"])
+            u_wl, r_wl, ev_wl = DB.load_all_whitelists()
+            if gid in u_wl:
+                ANTINUKE_WHITELIST[gid] = set(u_wl[gid])
+            if gid in r_wl:
+                ANTINUKE_ROLE_WHITELIST[gid] = set(r_wl[gid])
+            if gid in ev_wl:
+                for uid, evs in ev_wl[gid].items():
+                    ANTINUKE_EVENT_WHITELIST[gid][uid] = evs
+    except Exception as e:
+        print(f"[SYNC] AntiNuke reload error gid={gid}: {e}")
+
+    try:
+        # ── Anti-Spam ────────────────────────────────────────────────────────
+        if change_type in ("all", "antispam"):
+            all_antispam = DB.load_all_antispam()
+            if gid in all_antispam:
+                ANTISPAM_ENABLED[gid] = all_antispam[gid]
+    except Exception as e:
+        print(f"[SYNC] AntiSpam reload error gid={gid}: {e}")
+
+    try:
+        # ── Automod ──────────────────────────────────────────────────────────
+        if change_type in ("all", "automod"):
+            all_automod = DB.load_all_automod()
+            if gid in all_automod:
+                cfg = all_automod[gid]
+                if cfg["settings"]:
+                    AUTOMOD_SETTINGS[gid]   = cfg["settings"]
+                if cfg["punishment"]:
+                    AUTOMOD_PUNISHMENT[gid] = cfg["punishment"]
+                if cfg["wl_roles"]:
+                    AUTOMOD_WL_ROLES[gid]   = set(cfg["wl_roles"]) if isinstance(cfg["wl_roles"], list) else cfg["wl_roles"]
+                if cfg["timeouts"]:
+                    AUTOMOD_TIMEOUTS[gid]   = cfg["timeouts"]
+                if cfg["log_channel"]:
+                    AUTOMOD_LOG_CHANNEL[gid]= cfg["log_channel"]
+    except Exception as e:
+        print(f"[SYNC] Automod reload error gid={gid}: {e}")
+
+    try:
+        # ── Bot Admins ───────────────────────────────────────────────────────
+        if change_type in ("all", "admins"):
+            all_admins = DB.load_all_admins()
+            if gid in all_admins:
+                BOT_ADMINS[gid] = set(all_admins[gid])
+    except Exception as e:
+        print(f"[SYNC] Admins reload error gid={gid}: {e}")
+
+    try:
+        # ── Verify Config ────────────────────────────────────────────────────
+        if change_type in ("all", "verify"):
+            all_verify = DB.load_all_verify_configs()
+            if gid in all_verify:
+                cfg = all_verify[gid]
+                VERIFY_CONFIG[gid] = {
+                    "verified_role":   cfg.get("verified_role")   or None,
+                    "unverified_role": cfg.get("unverified_role") or None,
+                    "verify_ch":       cfg.get("verify_channel")  or None,
+                    "verify_log_ch":   cfg.get("log_channel")     or None,
+                }
+    except Exception as e:
+        print(f"[SYNC] Verify reload error gid={gid}: {e}")
+
+    try:
+        # ── Premium ──────────────────────────────────────────────────────────
+        if change_type in ("all", "premium"):
+            _refresh_premium_cache()
+            file_ids = _read_premium_file()
+            global _PREMIUM_CACHE
+            if file_ids:
+                _PREMIUM_CACHE |= file_ids
+            _load_premium_memory()
+    except Exception as e:
+        print(f"[SYNC] Premium reload error gid={gid}: {e}")
+
+
+@tasks.loop(seconds=10)
+async def _auto_sync_task():
+    """
+    Har 10 seconds mein DB sync_log check karo.
+    Dashboard ne jo bhi save kiya — automatically bot memory mein aajayega.
+    """
+    try:
+        pending = DB.get_pending_syncs()
+        if not pending:
+            return
+
+        done_ids = []
+        # Guild ke hisaab se group karo
+        guild_changes: dict[int, set] = {}
+        for row in pending:
+            gid = row["guild_id"]
+            ctype = row["change_type"]
+            if gid not in guild_changes:
+                guild_changes[gid] = set()
+            guild_changes[gid].add(ctype)
+            done_ids.append(row["id"])
+
+        # Reload
+        for gid, ctypes in guild_changes.items():
+            # Agar "all" hai ya bohot saari types, sirf "all" karo
+            if "all" in ctypes or len(ctypes) >= 4:
+                _reload_guild_settings(gid, "all")
+                print(f"[SYNC] Auto-reloaded ALL settings for guild {gid}")
+            else:
+                for ctype in ctypes:
+                    _reload_guild_settings(gid, ctype)
+                print(f"[SYNC] Auto-reloaded {ctypes} for guild {gid}")
+
+        DB.mark_syncs_done(done_ids)
+
+    except Exception as e:
+        print(f"[SYNC] Auto-sync error: {e}")
+
+
+@bot.listen("on_ready")
+async def _start_auto_sync():
+    if not _auto_sync_task.is_running():
+        _auto_sync_task.start()
+        print("[SYNC] Auto-sync task started — dashboard changes will reflect in 10s")
+
+
+# ─── Also add a background premium expiry checker ─────────────────────────────
+@tasks.loop(hours=1)
+async def _check_premium_expiry():
+    """Auto-deactivate premium servers whose expiry date has passed."""
+    from datetime import datetime, timezone
+    servers = DB.get_all_premium_servers()
+    now = datetime.now(timezone.utc)
+    for srv in servers:
+        expires = srv.get('expires_at', '')
+        if not expires or expires.strip() == '':
+            continue  # Lifetime — never expires
+        try:
+            exp_date = datetime.strptime(expires.strip(), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            if now > exp_date:
+                DB.deactivate_premium(srv['guild_id'])
+                guild = bot.get_guild(srv['guild_id'])
+                if guild:
+                    for ch in guild.text_channels:
+                        try:
+                            e = discord.Embed(
+                                title="⭐ Empire Prime Premium Expired",
+                                description=(
+                                    f"Your **Empire Prime Premium** subscription has expired.\n"
+                                    f"Renew at **bot.strengthcloud.xyz** to restore all features."
+                                ),
+                                color=0xed4245
+                            )
+                            e.set_footer(text=PREMIUM_FOOTER)
+                            await ch.send(embed=e)
+                            break
+                        except: pass
+        except: pass
+
+@bot.listen("on_ready")
+async def _start_premium_expiry_check():
+    if not _check_premium_expiry.is_running():
+        _check_premium_expiry.start()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  END
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  🔧 DEBUG PREMIUM — Owner only, diagnose premium DB issues
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="debugpremium")
+async def debug_premium_cmd(ctx, guild_id: int = None):
+    if ctx.author.id != BOT_OWNER_ID:
+        return await ctx.send(embed=discord.Embed(description="❌ Owner only.", color=0xed4245))
+    """Owner only: Debug premium status. $debugpremium [guild_id]"""
+    gid = guild_id or ctx.guild.id
+    is_prem = DB.is_premium_server(gid)
+    srv_data = DB.get_premium_server(gid)
+    all_prem = DB.get_all_premium_servers()
+
+    desc = (
+        f"**DB Path:** `{DB.DB_PATH}`\n"
+        f"**Guild ID checked:** `{gid}`\n"
+        f"**is_premium_server():** `{is_prem}`\n"
+        f"**Plan:** `{srv_data.get('plan_name', 'N/A') if srv_data else 'N/A'}`\n"
+        f"**Is VIP:** `{_is_vip(gid)}`\n"
+        f"**Raw DB row:** `{srv_data}`\n"
+        f"**Total premium servers in DB:** `{len(all_prem)}`\n"
+        f"**All premium guild IDs:** `{[s['guild_id'] for s in all_prem]}`\n"
+        f"**VIP cache:** `{list(_VIP_CACHE)}`"
+    )
+    e = discord.Embed(title="🔧 Premium Debug", description=desc, color=0xffa500)
+    await ctx.send(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  👑 OWNER PREMIUM GRANT — Activate premium directly from Discord (no dashboard)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot.command(name="grantpremium")
+async def grant_premium_cmd(ctx, guild_id: int = None, plan: str = "Premium"):
+    if ctx.author.id != BOT_OWNER_ID:
+        return await ctx.send(embed=discord.Embed(description="❌ Owner only.", color=0xed4245))
+    """Owner only: Grant premium to a server directly. $grantpremium [guild_id] [plan]"""
+    gid = guild_id or ctx.guild.id
+    DB.activate_premium(gid, plan, str(ctx.author), '')
+    _PREMIUM_CACHE.add(gid)          # Update in-memory cache immediately
+    if plan == 'VIP':
+        _VIP_CACHE.add(gid)          # Also add to VIP cache
+    _write_premium_file(_PREMIUM_CACHE)  # Write file so dashboard stays in sync
+    # Verify it worked
+    is_now = DB.is_premium_server(gid)
+    guild_obj = bot.get_guild(gid)
+    guild_name = guild_obj.name if guild_obj else str(gid)
+    e = discord.Embed(
+        title="✅ Premium Granted" if is_now else "❌ Grant Failed",
+        description=(
+            f"**Server:** {guild_name} (`{gid}`)\n"
+            f"**Plan:** {plan}\n"
+            f"**DB confirms active:** `{is_now}`\n"
+            f"**DB Path:** `{DB.DB_PATH}`"
+        ),
+        color=PREMIUM_COLOR if is_now else 0xed4245
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+@bot.command(name="revokepremium")
+async def revoke_premium_cmd(ctx, guild_id: int = None):
+    if ctx.author.id != BOT_OWNER_ID:
+        return await ctx.send(embed=discord.Embed(description="❌ Owner only.", color=0xed4245))
+    """Owner only: Revoke premium from a server. $revokepremium [guild_id]"""
+    gid = guild_id or ctx.guild.id
+    DB.deactivate_premium(gid)
+    _PREMIUM_CACHE.discard(gid)          # Remove from in-memory cache
+    _write_premium_file(_PREMIUM_CACHE)  # Update file
+    guild_obj = bot.get_guild(gid)
+    guild_name = guild_obj.name if guild_obj else str(gid)
+    e = discord.Embed(
+        title="🔴 Premium Revoked",
+        description=f"**Server:** {guild_name} (`{gid}`)\nPremium has been deactivated.",
+        color=0xed4245
+    )
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)
+
+@bot.command(name="listpremium")
+async def list_premium_cmd(ctx):
+    if ctx.author.id != BOT_OWNER_ID:
+        return await ctx.send(embed=discord.Embed(description="❌ Owner only.", color=0xed4245))
+    """Owner only: List all premium servers. $listpremium"""
+    servers = DB.get_all_premium_servers()
+    if not servers:
+        return await ctx.send(embed=discord.Embed(description="No premium servers active.", color=0xed4245))
+    desc = ""
+    for srv in servers:
+        g = bot.get_guild(srv['guild_id'])
+        name = g.name if g else f"Unknown ({srv['guild_id']})"
+        desc += f"• **{name}** — {srv['plan_name']} | Expires: `{srv['expires_at'] or 'Lifetime'}`\n"
+    e = discord.Embed(title="⭐ Active Premium Servers", description=desc, color=PREMIUM_COLOR)
+    e.set_footer(text=PREMIUM_FOOTER)
+    await ctx.send(embed=e)

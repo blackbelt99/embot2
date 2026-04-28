@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Pricing — Empire Prime{% endblock %}
+{% block content %}
+
+<section class="pricing-hero">
+  <div class="section-label">PRICING</div>
+  <h1>Simple, Transparent Pricing</h1>
+  <p>Choose the plan that fits your server. All plans include core features.</p>
+  <div style="margin-top:16px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+    <a href="https://discord.gg/GAhhVPFZff" class="btn btn-primary" target="_blank">💬 Join Discord</a>
+    <a href="https://bot.strengthcloud.xyz" class="btn btn-glass" target="_blank">🌐 Website</a>
+  </div>
+</section>
+
+{% if notice %}
+<div class="pricing-notice">
+  <span>📌</span> {{ notice }}
+</div>
+{% endif %}
+
+<section class="pricing-cards">
+  {% for plan in plans %}
+  <div class="price-card {% if loop.index == 2 %}price-popular{% endif %}">
+    {% if loop.index == 2 %}<div class="popular-badge">⭐ Most Popular</div>{% endif %}
+    <div class="price-badge" style="color:{{ plan.color }}">{{ plan.badge }}</div>
+    <div class="price-name">{{ plan.name }}</div>
+    <div class="price-amount" style="color:{{ plan.color }}">{{ plan.price }}</div>
+    <div class="price-duration">per {{ plan.duration }}</div>
+    <div class="price-desc">{{ plan.description }}</div>
+    <div class="price-divider"></div>
+    <ul class="price-features">
+      {% for f in plan.features %}
+      <li><span class="pf-check" style="color:{{ plan.color }}">✓</span> {{ f }}</li>
+      {% endfor %}
+    </ul>
+    <a href="{{ discord_invite or 'https://discord.gg/' }}" class="btn btn-primary price-btn" style="background:{{ plan.color }};border-color:{{ plan.color }}" target="_blank">
+      Get {{ plan.name }} →
+    </a>
+  </div>
+  {% else %}
+  <div style="text-align:center;color:var(--text2);padding:64px;grid-column:1/-1">No plans available yet.</div>
+  {% endfor %}
+</section>
+
+<section class="pricing-faq">
+  <h2>How to Purchase</h2>
+  <div class="faq-steps">
+    <div class="faq-step">
+      <div class="fqs-num">1</div>
+      <div>
+        <strong>Choose a plan</strong>
+        <p>Pick the plan above that fits your server size and needs.</p>
+      </div>
+    </div>
+    <div class="faq-step">
+      <div class="fqs-num">2</div>
+      <div>
+        <strong>Make payment</strong>
+        {% if upi %}<p>UPI: <code>{{ upi }}</code></p>{% endif %}
+        {% if paypal %}<p>PayPal: <a href="{{ paypal }}" target="_blank">{{ paypal }}</a></p>{% endif %}
+      </div>
+    </div>
+    <div class="faq-step">
+      <div class="fqs-num">3</div>
+      <div>
+        <strong>Open a ticket or DM us</strong>
+        {% if contact %}<p>Contact: <code>{{ contact }}</code></p>{% endif %}
+        {% if discord_invite %}<p>Server: <a href="{{ discord_invite }}" target="_blank">Join Discord</a></p>{% endif %}
+        <p>Send payment screenshot and your Server ID</p>
+      </div>
+    </div>
+    <div class="faq-step">
+      <div class="fqs-num">4</div>
+      <div>
+        <strong>Done!</strong>
+        <p>We'll activate your plan within a few hours.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+{% endblock %}

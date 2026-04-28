@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Empire Prime — Powerful Discord Bot{% endblock %}
+{% block content %}
+
+<section class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-content">
+    <div class="hero-badge"><span class="badge-dot"></span>Online & Ready</div>
+    <h1 class="hero-title">The Ultimate<br><span class="gradient-text">Discord Bot</span></h1>
+    <p class="hero-desc">Anti-Nuke, Music, Automod, Tickets, Verification — all managed from one beautiful dashboard.</p>
+    <div class="hero-actions">
+      {% if user %}
+        <a href="{{ url_for('dashboard') }}" class="btn btn-primary btn-xl">Open Dashboard</a>
+      {% else %}
+        <a href="{{ url_for('login') }}" class="btn btn-primary btn-xl">Login with Discord</a>
+      {% endif %}
+      <a href="{{ invite }}" class="btn btn-glass btn-xl" target="_blank">Add to Server →</a>
+      <a href="https://discord.gg/GAhhVPFZff" class="btn btn-glass btn-xl" target="_blank">💬 Discord Server</a>
+    </div>
+    <div class="stats-bar">
+      <div class="stat-item"><span class="stat-num" id="stat-guilds">...</span><span class="stat-label">Servers</span></div>
+      <div class="stat-div"></div>
+      <div class="stat-item"><span class="stat-num">50+</span><span class="stat-label">Commands</span></div>
+      <div class="stat-div"></div>
+      <div class="stat-item"><span class="stat-num">24/7</span><span class="stat-label">Uptime</span></div>
+      <div class="stat-div"></div>
+      <div class="stat-item"><span class="stat-num">8</span><span class="stat-label">Filters</span></div>
+    </div>
+  </div>
+  <div class="hero-card-wrap">
+    <div class="hero-card">
+      <div class="card-top">
+        <div class="bot-avatar">⚡</div>
+        <div>
+          <div class="bot-name">Empire Prime <span class="app-badge">APP</span></div>
+          <div class="bot-status"><span class="online-dot"></span> Online</div>
+        </div>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-features">
+        <div class="cf-item cf-blue">🛡️ Anti-Nuke</div>
+        <div class="cf-item cf-purple">🎫 Tickets</div>
+        <div class="cf-item cf-orange">🤖 Automod</div>
+        <div class="cf-item cf-teal">✅ Verify</div>
+        <div class="cf-item cf-pink">📊 Invites</div>
+      </div>
+      <div class="card-divider"></div>
+      <div class="card-cmd">
+        <span class="cmd-prefix">$</span>
+        <span class="cmd-text" id="typing-cmd">antinuke enable</span>
+        <span class="cmd-cursor">|</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="features-section">
+  <div class="section-label">FEATURES</div>
+  <h2 class="section-title">Everything your server needs</h2>
+  <p class="section-desc">One bot. Every feature. Zero compromises.</p>
+  <div class="features-grid">
+    <div class="feat-card feat-highlight">
+      <div class="feat-icon-wrap feat-icon-blue">🛡️</div>
+      <h3>Anti-Nuke</h3>
+      <p>Real-time protection against mass bans, channel nukes, role manipulation and raids. Auto-punish attackers instantly.</p>
+      <div class="feat-tags"><span>Mass Ban</span><span>Raid Shield</span><span>Auto-Punish</span></div>
+    </div>
+
+    <div class="feat-card">
+      <div class="feat-icon-wrap feat-icon-purple">🎫</div>
+      <h3>Ticket System</h3>
+      <p>Multi-category tickets with custom panels, staff ping, auto-log and close DMs per server.</p>
+      <div class="feat-tags"><span>Categories</span><span>Auto-Log</span><span>Custom Panel</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap feat-icon-orange">🤖</div>
+      <h3>Automod</h3>
+      <p>10+ automod rules — spam, caps, links, invites, NSFW, token detection. Full control via dashboard.</p>
+      <div class="feat-tags"><span>Anti-Spam</span><span>Anti-NSFW</span><span>10+ Rules</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap feat-icon-teal">✅</div>
+      <h3>Verification</h3>
+      <p>Button-click verification with Verified/Unverified roles and detailed verification logs.</p>
+      <div class="feat-tags"><span>Button Verify</span><span>Role Assign</span><span>Logs</span></div>
+    </div>
+    <div class="feat-card">
+      <div class="feat-icon-wrap feat-icon-pink">🌐</div>
+      <h3>Web Dashboard</h3>
+      <p>Manage everything from your browser. Toggle features, set channels, configure — no commands needed.</p>
+      <div class="feat-tags"><span>Browser</span><span>Per-Server</span><span>Real-time</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="howto-section">
+  <div class="section-label">GET STARTED</div>
+  <h2 class="section-title">Up in 3 steps</h2>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-content"><h4>Add Empire Prime</h4><p>Click "Add to Server" and select your Discord server.</p></div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="step-num">2</div><div class="step-content"><h4>Login to Dashboard</h4><p>Click "Login with Discord" and authorize.</p></div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="step-num">3</div><div class="step-content"><h4>Configure & Done</h4><p>Toggle features, set channels — all from browser!</p></div></div>
+  </div>
+</section>
+
+<section class="commands-section">
+  <div class="section-label">COMMANDS</div>
+  <h2 class="section-title">Quick Commands</h2>
+  <div class="cmd-grid">
+    <div class="cmd-item"><code class="cmd-code cmd-blue">$antinuke enable</code><span class="cmd-desc">Enable anti-nuke protection</span></div>
+    <div class="cmd-item"><code class="cmd-code cmd-purple">$ticket panel</code><span class="cmd-desc">Send ticket panel</span></div>
+    <div class="cmd-item"><code class="cmd-code cmd-orange">$antispam on</code><span class="cmd-desc">Enable anti-spam</span></div>
+    <div class="cmd-item"><code class="cmd-code cmd-teal">$verify panel</code><span class="cmd-desc">Send verification button</span></div>
+    <div class="cmd-item"><code class="cmd-code cmd-pink">$setuplogs all #ch</code><span class="cmd-desc">Set all log channels</span></div>
+    <div class="cmd-item"><code class="cmd-code cmd-gray">$help</code><span class="cmd-desc">View all commands</span></div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <div class="cta-glow"></div>
+  <div class="cta-content">
+    <h2>Ready to protect your server?</h2>
+    <p>Add Empire Prime and set up everything in minutes — completely free.</p>
+    <div class="cta-btns">
+      <a href="{{ invite }}" class="btn btn-primary btn-xl" target="_blank">Add Empire Prime for Free</a>
+      <a href="https://discord.gg/GAhhVPFZff" class="btn btn-glass btn-xl" target="_blank">💬 Join Support Server</a>
+      {% if not user %}<a href="{{ url_for('login') }}" class="btn btn-glass btn-xl">Open Dashboard</a>{% endif %}
+    </div>
+  </div>
+</section>
+
+<script>
+fetch('/api/stats').then(r=>r.json()).then(d=>{
+  const el=document.getElementById('stat-guilds');
+  if(el) el.textContent=d.guilds||'?';
+});
+const cmds=['antinuke enable','ticket panel','antispam on','verify setup','help'];
+let ci=0,ci2=0,typing=true;
+const el=document.getElementById('typing-cmd');
+function typeNext(){
+  if(!el)return;
+  const cmd=cmds[ci];
+  if(typing){el.textContent=cmd.slice(0,++ci2);if(ci2>=cmd.length){typing=false;setTimeout(typeNext,1800);return;}setTimeout(typeNext,80);}
+  else{el.textContent=cmd.slice(0,--ci2);if(ci2<=0){typing=true;ci=(ci+1)%cmds.length;setTimeout(typeNext,400);return;}setTimeout(typeNext,40);}
+}
+setTimeout(typeNext,1000);
+</script>
+{% endblock %}
